@@ -1,0 +1,12 @@
+{
+    "projectName": "SupermarketDev", 
+    "projectID": "699ffc948c21be18d8709612", 
+    "serverPort": 36923, 
+    "syncEnabled": true, 
+    "excludePatterns": [
+        ".vscode", 
+        ".git", 
+        "EggyAPI.lua"
+    ], 
+    "version": "1.0.0"
+}

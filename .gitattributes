@@ -1,0 +1,4 @@
+#mac git config --global core.autocrlf input
+#win git config --global core.autocrlf false
+* text=auto eol=lf
+*.lua text eol=lf
