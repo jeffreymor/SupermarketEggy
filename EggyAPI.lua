@@ -428,6 +428,11 @@ UnitGroup = {}
 
 ---@alias UnitKey integer 单位编号
 
+---@class Vehicle: Unit, VehicleComp
+Vehicle = {}
+
+---@alias VehicleKey UnitKey 单位编号(载具)
+
 ---@class Enums
 Enums = {}
 
@@ -1110,6 +1115,8 @@ Enums.ValueType = {
 	ListUnitType = 'ListUnitType',  ---单位类型列表
 	ListValueType = 'ListValueType',  ---值类型列表
 	ListVector3 = 'ListVector3',  ---向量列表
+	ListVehicle = 'ListVehicle',  ---载具列表
+	ListVehicleKey = 'ListVehicleKey',  ---单位编号(载具)列表
 	ListWindFieldShapeType = 'ListWindFieldShapeType',  ---风场形状列表
 	ModelSocket = 'ModelSocket',  ---部位
 	Modifier = 'Modifier',  ---效果
@@ -1158,6 +1165,8 @@ Enums.ValueType = {
 	UnitType = 'UnitType',  ---单位类型
 	ValueType = 'ValueType',  ---值类型
 	Vector3 = 'Vector3',  ---向量
+	Vehicle = 'Vehicle',  ---载具
+	VehicleKey = 'VehicleKey',  ---单位编号(载具)
 	WindFieldShapeType = 'WindFieldShapeType',  ---风场形状
 }
 
@@ -2253,6 +2262,18 @@ function Character.start_move_to_pos(_target_pos, _duration) end
 ---@see CharacterComp.stop_forced_move
 function Character.stop_forced_move() end
 
+---生命体尝试上载具
+---@param _vehicle Vehicle 载具
+---@deprecated
+---@see LifeEntity.try_enter_vehicle
+function Character.try_enter_ugcvehicle(_vehicle) end
+
+---生命体尝试上载具
+---@param _vehicle Vehicle 载具
+---@deprecated
+---@see LifeEntity.try_enter_vehicle
+function Character.try_enter_vehicle(_vehicle) end
+
 ---生命体尝试下载具
 ---@deprecated
 ---@see LifeEntity.try_exit_vehicle
@@ -2420,6 +2441,21 @@ CustomTriggerSpace = {}
 ---获取触发区域内的随机坐标
 ---@return Vector3 坐标
 function CustomTriggerSpace.random_point() end
+
+---@class DebugAPI
+DebugAPI = {}
+
+---绘制线段
+---@param _start_pos Vector3 起点
+---@param _end_pos Vector3 终点
+---@param _color Color 颜色
+---@param _duration Fixed 时长
+function DebugAPI.draw_line(_start_pos, _end_pos, _color, _duration) end
+
+---绘制文本
+---@param _pos Vector3 位置
+---@param _text string 文本
+function DebugAPI.draw_text(_pos, _text) end
 
 ---@class DisplayComp
 DisplayComp = {}
@@ -2892,6 +2928,14 @@ function GameAPI.copy_sheet(_sheet_id) end
 ---@see GameAPI.copy_sheet
 function GameAPI.copy_table(_sheet_id) end
 
+---复制载具
+---@param _vehicle Vehicle 载具
+---@param _pos Vector3 位置
+---@param _direction Vector3 朝向
+---@param _role Role? 所属玩家
+---@return Vehicle 创建出的载具
+function GameAPI.copy_vehicle(_vehicle, _pos, _direction, _role) end
+
 ---创建表
 ---@return SheetID 表格
 ---@deprecated
@@ -3047,6 +3091,14 @@ function GameAPI.create_unit_group(_unit_group_id, _pos, _root_quaternion, _role
 ---@return Unit 创建出的单位
 function GameAPI.create_unit_with_scale(_u_key, _pos, _rotation, _scale) end
 
+---创建载具
+---@param _vehicle_key VehicleKey 载具编号
+---@param _pos Vector3 位置
+---@param _direction Vector3 朝向
+---@param _role Role? 所属玩家
+---@return Vehicle 载具
+function GameAPI.create_vehicle(_vehicle_key, _pos, _direction, _role) end
+
 ---获取生物预设的自定义值
 ---@param _value_type Enums.ValueType 值类型
 ---@param _key CreatureKey 生物编号
@@ -3102,6 +3154,10 @@ function GameAPI.deal_damage(_dst, _dmg, _src, _schema, _data) end
 ---@see GameAPI.remove_pathpoint
 function GameAPI.del_road_point(_path_id, _index) end
 
+---删除载具
+---@param _unit Vehicle 载具
+function GameAPI.delay_destroy_vehicle(_unit) end
+
 ---销毁场景界面
 ---@param _layer E3DLayer 场景界面
 function GameAPI.destroy_scene_ui(_layer) end
@@ -3114,6 +3170,22 @@ function GameAPI.destroy_unit(_unit) end
 ---@param _unit Unit 单位
 ---@param _destroy_children boolean? 是否销毁子组件
 function GameAPI.destroy_unit_with_children(_unit, _destroy_children) end
+
+---绘制线段
+---@param _start_pos Vector3 起点
+---@param _end_pos Vector3 终点
+---@param _color Color 颜色
+---@param _duration Fixed 时长
+---@deprecated
+---@see DebugAPI.draw_line
+function GameAPI.draw_line(_start_pos, _end_pos, _color, _duration) end
+
+---绘制文本
+---@param _pos Vector3 位置
+---@param _text string 文本
+---@deprecated
+---@see DebugAPI.draw_text
+function GameAPI.draw_text(_pos, _text) end
 
 ---设置单位与预设是否能发生碰撞
 ---@param _unit Unit 单位
@@ -3340,6 +3412,11 @@ function GameAPI.get_customtriggerspaces_in_raycast(_start_pos, _end_pos) end
 ---@param _timestamp Timestamp 时间戳
 ---@return integer 日
 function GameAPI.get_day(_timestamp) end
+
+---获取角色当前骑乘的载具
+---@param _character Character 角色
+---@return Vehicle 载具
+function GameAPI.get_driving_vehicle(_character) end
 
 ---获取环境时间
 ---@return Fixed 当前环境时刻
@@ -4858,6 +4935,10 @@ function LifeEntity.stop_ai() end
 ---@param _slot_type Enums.EquipmentSlotType? 槽位类型
 ---@param _slot EquipmentSlot? 槽位
 function LifeEntity.swap_equipment_slot(_equipment, _slot_type, _slot) end
+
+---生命体尝试上载具
+---@param _vehicle Vehicle 载具
+function LifeEntity.try_enter_vehicle(_vehicle) end
 
 ---生命体尝试下载具
 function LifeEntity.try_exit_vehicle() end
@@ -7256,6 +7337,11 @@ function Unit.set_rush_cd(_time) end
 ---@see RushComp.set_rush_remaining_cooldown
 function Unit.set_rush_left_cd(_time) end
 
+---设置单位缩放
+---@param _scale Fixed 缩放
+---@param _time Fixed 时间
+function Unit.set_scale(_scale, _time) end
+
 ---设置单位选中物品格
 ---@param _slot_type Enums.EquipmentSlotType 槽位类型
 ---@param _slot_index integer 槽位索引
@@ -8027,6 +8113,19 @@ end)
 --]]
 EVENT.ANY_OBSTACLE_TRIGGER_SPACE = "ANY_OBSTACLE_TRIGGER_SPACE"
 
+---任意玩家低帧率
+---事件主体 Global 全局触发器
+---注册参数 _frame_rate integer 当前帧数
+---事件回调参数 role Role 目标玩家
+---事件回调参数 frame_rate integer 当前帧数
+--[[
+LuaAPI.global_register_trigger_event({EVENT.ANY_ROLE_LOW_FPS, _frame_rate}, function(event_name, actor, data)
+	print(data.role)
+	print(data.frame_rate)
+end)
+--]]
+EVENT.ANY_ROLE_LOW_FPS = "ANY_ROLE_LOW_FPS"
+
 ---玩家积分变化
 ---事件主体 Global 全局触发器
 ---事件回调参数 role Role 触发玩家
@@ -8297,8 +8396,8 @@ EVENT.SPEC_CHARACTER_SELECT_EQUIPMENT_SLOT = "SPEC_CHARACTER_SELECT_EQUIPMENT_SL
 
 ---指定道具被获取
 ---事件主体 Default 多类型
----注册参数 _commodity_id UgcCommodity SPEC_UGC_COMMODITY
----事件回调参数 commodity_id UgcCommodity SPEC_UGC_COMMODITY
+---注册参数 _commodity_id UgcCommodity 商城道具
+---事件回调参数 commodity_id UgcCommodity 商城道具
 ---事件回调参数 camp_role_owner Role 携带道具的玩家
 ---事件回调参数 commodity_num integer 获得数量
 --[[
@@ -8701,9 +8800,11 @@ EVENT.SPEC_LIFEENTITY_DMG_BEFORE = "SPEC_LIFEENTITY_DMG_BEFORE"
 ---指定生命体上载具
 ---事件主体 LifeEntity 生命体
 ---事件回调参数 unit LifeEntity 触发角色/生物
+---事件回调参数 vehicle Vehicle 触发载具
 --[[
 LuaAPI.unit_register_trigger_event(_unit, {EVENT.SPEC_LIFEENTITY_ENTER_VEHICLE, }, function(event_name, actor, data)
 	print(data.unit)
+	print(data.vehicle)
 end)
 --]]
 EVENT.SPEC_LIFEENTITY_ENTER_VEHICLE = "SPEC_LIFEENTITY_ENTER_VEHICLE"
@@ -8729,9 +8830,11 @@ EVENT.SPEC_LIFEENTITY_EQUIPMENT_SLOT_CHANGE = "SPEC_LIFEENTITY_EQUIPMENT_SLOT_CH
 ---指定生命体下载具
 ---事件主体 LifeEntity 生命体
 ---事件回调参数 unit LifeEntity 触发角色/生物
+---事件回调参数 vehicle Vehicle 触发载具
 --[[
 LuaAPI.unit_register_trigger_event(_unit, {EVENT.SPEC_LIFEENTITY_EXIT_VEHICLE, }, function(event_name, actor, data)
 	print(data.unit)
+	print(data.vehicle)
 end)
 --]]
 EVENT.SPEC_LIFEENTITY_EXIT_VEHICLE = "SPEC_LIFEENTITY_EXIT_VEHICLE"

@@ -126,7 +126,11 @@ return {
 	ShopFrame = "1519736575|1966329154" --[[@as EImage]],
 	ShopList = "1519736575|1140379592" --[[@as EList]],
 	Test = "1519736575|1772889342" --[[@as ECanvas]],
-	TestImage = "1519736575|1878224505" --[[@as EImage]],
+	TestCreateBtn = "1519736575|1833476748" --[[@as EButton]],
+	TestKeyVisual = "1519736575|1511803957" --[[@as EImage]],
+	TestReleaseBtn = "1519736575|1109884778" --[[@as EButton]],
+	TestTextUpdateBtn = "1519736575|1336654709" --[[@as EButton]],
+	TestVisibilityUpdateBtn = "1519736575|2053512491" --[[@as EButton]],
 	TotalTextLabel = "1519736575|1915366402" --[[@as ELabel]],
 	TotalValueLabel = "1519736575|1154457549" --[[@as ELabel]],
 	UnitLabel_1_1 = "1519736575|1164365800" --[[@as ELabel]],
@@ -142,4 +146,5 @@ return {
 	UnitPrice_3_1 = "1519736575|1401494120" --[[@as ELabel]],
 	UnitPrice_3_2 = "1519736575|1351609048" --[[@as ELabel]],
 	["画布0"] = "1519736575|1405255247" --[[@as ECanvas]],
+	["金色旋转"] = "1519736575|1015888394" --[[@as EAnimation]],
 }
