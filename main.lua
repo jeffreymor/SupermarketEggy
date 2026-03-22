@@ -1,9 +1,11 @@
 local ShoppingCartUI = require("ShoppingCartUI")
 local TestCreateFrontBox = require("TestCreateFrontBox")
+local TestAttactmentHelper = require("TestAttactmentHelper")
 
 LuaAPI.global_register_trigger_event({ EVENT.GAME_INIT }, function()
     -- require("UICheck")
     -- ShoppingCartUI.init()
-    TestCreateFrontBox.init()
-    -- require("Test")
+    -- TestCreateFrontBox.init()
+    TestAttactmentHelper.init()
+    require("Test")
 end)
