@@ -7,6 +7,7 @@ local ShelfAttachmentConfig = require("Config.ShelfAttachmentConfig")
 
 local SUCCESS_TIPS_DURATION = 2.0 -- 成功提示时长（GlobalAPI.show_tips _duration，单位：秒）
 local ERROR_TIPS_DURATION = 3.0 -- 失败提示时长（GlobalAPI.show_tips _duration，单位：秒）
+local DEBUG_LOG_ENABLED = false -- 排障日志开关（默认关闭）
 local DEFAULT_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 默认缩放（GameAPI.create_unit_with_scale _scale）
 local DEFAULT_ROTATION_OFFSET = math.Quaternion(0.0, 0.0, 0.0) -- 默认旋转偏移（GameAPI.create_unit_with_scale _rotation）
 
@@ -17,6 +18,15 @@ local AXIS_ENUM = {
 }
 
 local shelfAttachmentStates = dict()
+local shelfDestroyQueue = {}
+local inited = false
+
+local function debugLog(...)
+    if not DEBUG_LOG_ENABLED then
+        return
+    end
+    print(TAG, ...)
+end
 
 ---@param value any
 ---@return boolean
@@ -425,13 +435,116 @@ local function buildAttachmentSpawnTasks(shelfConfig)
 end
 
 ---@param shelfUnit Unit
+local function enqueueShelfForDestroy(shelfUnit)
+    shelfDestroyQueue[#shelfDestroyQueue + 1] = shelfUnit
+end
+
+---@param shelfUnit Unit
+local function removeShelfFromDestroyQueue(shelfUnit)
+    for index, queuedShelfUnit in ipairs(shelfDestroyQueue) do
+        if queuedShelfUnit == shelfUnit then
+            table.remove(shelfDestroyQueue, index)
+            return true
+        end
+    end
+    return false
+end
+
+---@return Unit|nil
+local function popNextShelfToDestroy()
+    if #shelfDestroyQueue == 0 then
+        return nil
+    end
+    local shelfUnit = shelfDestroyQueue[1]
+    table.remove(shelfDestroyQueue, 1)
+    return shelfUnit
+end
+
+---@param shelfUnit Unit
+---@param state table
+local function destroyAttachmentsInState(state)
+    for _, rowLayers in pairs(state.layers or {}) do
+        for _, attachmentInfo in pairs(rowLayers or {}) do
+            local attachmentUnit = attachmentInfo.unit
+            if attachmentUnit ~= nil then
+                pcall(function()
+                    GameAPI.destroy_unit(attachmentUnit)
+                end)
+            end
+        end
+    end
+end
+
+---@param shelfUnit Unit
+---@param state table|nil
+---@param destroyAttachments boolean|nil
+local function clearShelfAttachmentState(shelfUnit, state, destroyAttachments)
+    local currentState = shelfAttachmentStates:get(shelfUnit)
+    if state == nil then
+        state = currentState
+    end
+    if state == nil then
+        return
+    end
+
+    state.destroyed = true
+    if state.timer ~= nil then
+        state.timer:cancel()
+        state.timer = nil
+    end
+    if destroyAttachments then
+        destroyAttachmentsInState(state)
+    end
+    if currentState == state then
+        shelfAttachmentStates:set(shelfUnit, nil)
+    end
+end
+
+---@param shelfUnit Unit
+---@param state table
+---@param reason string
+local function abortShelfSpawn(shelfUnit, state, reason)
+    print(
+        TAG,
+        "abort shelf attachments, shelfId:",
+        state.shelfId,
+        "reason:",
+        reason,
+        "success:",
+        state.spawnedCount,
+        "failed:",
+        state.failedCount
+    )
+    removeShelfFromDestroyQueue(shelfUnit)
+    clearShelfAttachmentState(shelfUnit, state, true)
+end
+
+---@param shelfUnit Unit
+---@param state table
+local function registerShelfDestroyEvents(shelfUnit, state)
+    LuaAPI.unit_register_trigger_event(shelfUnit, { EVENT.SPEC_OBSTACLE_DESTROY }, function()
+        local currentState = shelfAttachmentStates:get(shelfUnit)
+        if currentState == state and not state.destroyed then
+            abortShelfSpawn(shelfUnit, state, "SPEC_OBSTACLE_DESTROY")
+        end
+    end)
+
+    LuaAPI.unit_register_trigger_event(shelfUnit, { EVENT.SPEC_LIFEENTITY_DESTROY }, function()
+        local currentState = shelfAttachmentStates:get(shelfUnit)
+        if currentState == state and not state.destroyed then
+            abortShelfSpawn(shelfUnit, state, "SPEC_LIFEENTITY_DESTROY")
+        end
+    end)
+end
+
+---@param shelfUnit Unit
 ---@param shelfId string
 ---@param totalCount integer
 ---@return table
 local function createShelfAttachmentState(shelfUnit, shelfId, totalCount)
     local oldState = shelfAttachmentStates:get(shelfUnit)
-    if oldState ~= nil and oldState.timer ~= nil then
-        oldState.timer:cancel()
+    if oldState ~= nil then
+        clearShelfAttachmentState(shelfUnit, oldState, false)
     end
 
     local state = {
@@ -441,6 +554,7 @@ local function createShelfAttachmentState(shelfUnit, shelfId, totalCount)
         failedCount = 0,
         timer = nil,
         layers = {},
+        destroyed = false,
     }
     shelfAttachmentStates:set(shelfUnit, state)
     return state
@@ -469,6 +583,10 @@ end
 ---@param state table
 ---@param task table
 local function spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
+    if state.destroyed or shelfAttachmentStates:get(shelfUnit) ~= state then
+        return
+    end
+
     local attachmentRotation = buildAttachmentRotation(shelfConfig, shelfUnit)
     local attachmentOffset = buildLocalOffset(shelfConfig, task.rowIndex, task.columnIndex)
     local attachmentPosition = shelfUnit.get_local_offset_position(attachmentOffset)
@@ -496,8 +614,7 @@ local function spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
 
     state.spawnedCount = state.spawnedCount + 1
     recordAttachmentIndex(state, task, attachmentUnit)
-    print(
-        TAG,
+    debugLog(
         "create attachment success, shelfId:",
         state.shelfId,
         "row:",
@@ -511,8 +628,9 @@ local function spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
     )
 end
 
+---@param shelfUnit Unit
 ---@param state table
-local function onShelfSpawnFinished(state)
+local function onShelfSpawnFinished(shelfUnit, state)
     print(
         TAG,
         "create shelf attachments done, shelfId:",
@@ -538,16 +656,22 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
     local spawnTasks = buildAttachmentSpawnTasks(shelfConfig)
     local totalCount = #spawnTasks
     local state = createShelfAttachmentState(shelfUnit, shelfConfig.shelfId, totalCount)
+    registerShelfDestroyEvents(shelfUnit, state)
     if totalCount == 0 then
-        onShelfSpawnFinished(state)
+        onShelfSpawnFinished(shelfUnit, state)
         return
     end
 
     if not enableSlowSpawn then
         for taskIndex, task in ipairs(spawnTasks) do
+            if state.destroyed or shelfAttachmentStates:get(shelfUnit) ~= state then
+                return
+            end
             spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
             if taskIndex == totalCount then
-                onShelfSpawnFinished(state)
+                if not state.destroyed and shelfAttachmentStates:get(shelfUnit) == state then
+                    onShelfSpawnFinished(shelfUnit, state)
+                end
             end
         end
         return
@@ -557,6 +681,10 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
     local timer = Timer.new(shelfConfig.spawnIntervalSec, true, totalCount)
     state.timer = timer
     timer:setTimeEndCb(function()
+        if state.destroyed or shelfAttachmentStates:get(shelfUnit) ~= state then
+            return
+        end
+
         nextTaskIndex = nextTaskIndex + 1
         local task = spawnTasks[nextTaskIndex]
         if task ~= nil then
@@ -565,13 +693,38 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
 
         if nextTaskIndex >= totalCount then
             state.timer = nil
-            onShelfSpawnFinished(state)
+            if not state.destroyed and shelfAttachmentStates:get(shelfUnit) == state then
+                onShelfSpawnFinished(shelfUnit, state)
+            end
         end
     end)
     timer:start()
 end
 
+---@param actor Actor|nil
+---@param data table|nil
+local function destroyNextShelf(actor, data)
+    if data == nil then
+        print(TAG, "touch data nil: TestShelfDestroy", actor)
+        return
+    end
+
+    local shelfUnit = popNextShelfToDestroy()
+    if shelfUnit == nil then
+        GlobalAPI.show_tips("暂无可销毁货架", ERROR_TIPS_DURATION)
+        return
+    end
+
+    clearShelfAttachmentState(shelfUnit, nil, true)
+    GameAPI.destroy_unit(shelfUnit)
+    GlobalAPI.show_tips("已销毁队首货架，剩余: " .. tostring(#shelfDestroyQueue), SUCCESS_TIPS_DURATION)
+end
+
 function TestAttactmentHelper.init()
+    if inited then
+        return
+    end
+
     local createForwardDistance = loadCreateForwardDistance()
     if createForwardDistance == nil then
         GlobalAPI.show_tips("配置错误：CREATE_FORWARD_DISTANCE", ERROR_TIPS_DURATION)
@@ -652,8 +805,22 @@ function TestAttactmentHelper.init()
             return
         end
 
+        enqueueShelfForDestroy(shelfUnit)
         spawnAttachmentsOnShelf(shelfUnit, runtimeShelfConfig, enableSlowSpawn)
     end)
+
+    local destroyNode = UINodes.TestShelfDestroy
+    if destroyNode == nil then
+        print(TAG, "missing ui node: TestShelfDestroy")
+        GlobalAPI.show_tips("缺少节点 TestShelfDestroy", ERROR_TIPS_DURATION)
+        return
+    end
+
+    LuaAPI.global_register_trigger_event({ EVENT.EUI_NODE_TOUCH_EVENT, destroyNode, 1 }, function(_, actor, data)
+        destroyNextShelf(actor, data)
+    end)
+
+    inited = true
 end
 
 return TestAttactmentHelper

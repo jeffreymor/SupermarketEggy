@@ -131,6 +131,7 @@ return {
 	TestKeyVisual = "1519736575|1511803957" --[[@as EImage]],
 	TestReleaseBtn = "1519736575|1109884778" --[[@as EButton]],
 	TestShelfCreate = "1519736575|1932931145" --[[@as EButton]],
+	TestShelfDestroy = "1519736575|1930191812" --[[@as EButton]],
 	TestTextUpdateBtn = "1519736575|1336654709" --[[@as EButton]],
 	TestVisibilityUpdateBtn = "1519736575|2053512491" --[[@as EButton]],
 	TotalTextLabel = "1519736575|1915366402" --[[@as ELabel]],
