@@ -2,7 +2,7 @@
 
 return {
 	scene_eui = {
-		TestLayerTemplate = 1073737851,
+		DeploySceneUI = 1073737757,
 	},
 	unit = {
 		AirBox = 1073844229,

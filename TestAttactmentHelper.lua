@@ -3,6 +3,7 @@ local TestAttactmentHelper = {}
 local TAG = "[TestAttactmentHelper]"
 local Timer = require("Utils.Timer")
 local UINodes = require("Data.UINodes")
+local Prefab = require("Data.Prefab")
 local ShelfAttachmentConfig = require("Config.ShelfAttachmentConfig")
 
 local SUCCESS_TIPS_DURATION = 2.0 -- 成功提示时长（GlobalAPI.show_tips _duration，单位：秒）
@@ -10,6 +11,9 @@ local ERROR_TIPS_DURATION = 3.0 -- 失败提示时长（GlobalAPI.show_tips _dur
 local DEBUG_LOG_ENABLED = false -- 排障日志开关（默认关闭）
 local DEFAULT_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 默认缩放（GameAPI.create_unit_with_scale _scale）
 local DEFAULT_ROTATION_OFFSET = math.Quaternion(0.0, 0.0, 0.0) -- 默认旋转偏移（GameAPI.create_unit_with_scale _rotation）
+local SHELF_ROW_BUTTON_SIDE_GAP = 2.0 -- 每层按钮相对最右 Attachment 的横向外移（buildLocalOffset 列轴本地偏移，单位：米）
+local SHELF_ROW_BUTTON_DURATION = -1.0 -- 每层按钮 SceneUI 持续时长（SceneUI.create_scene_ui_bind_unit _duration，-1 常驻）
+local SHELF_ROW_BUTTON_SOCKET = Enums.ModelSocket.socket_body -- 每层按钮 SceneUI 绑定挂点（SceneUI.create_scene_ui_bind_unit _socket_name）
 
 local AXIS_ENUM = {
     x = true,
@@ -411,6 +415,74 @@ local function buildLocalOffset(shelfConfig, rowIndex, columnIndex)
 end
 
 ---@param shelfConfig table
+---@param rowIndex integer
+---@return Vector3
+local function buildRowButtonOffset(shelfConfig, rowIndex)
+    local layout = shelfConfig.layout
+    local axisMap = layout.axisMap
+    local rowRightAttachmentOffset = buildLocalOffset(shelfConfig, rowIndex, layout.perRow)
+    local rowButtonGapOffset = {
+        x = 0.0,
+        y = 0.0,
+        z = 0.0,
+    }
+    rowButtonGapOffset[axisMap.columnAxis] = SHELF_ROW_BUTTON_SIDE_GAP * axisMap.columnSign
+    return rowRightAttachmentOffset + math.Vector3(rowButtonGapOffset.x, rowButtonGapOffset.y, rowButtonGapOffset.z)
+end
+
+---@param shelfUnit Unit
+---@param rowButtonLocalOffset Vector3
+---@return Vector3
+local function buildRowButtonWorldOffset(shelfUnit, rowButtonLocalOffset)
+    local rowButtonWorldPosition = shelfUnit.get_local_offset_position(rowButtonLocalOffset)
+    local shelfWorldPosition = shelfUnit.get_position()
+    return rowButtonWorldPosition - shelfWorldPosition
+end
+
+---@param state table|nil
+local function destroyShelfRowButtons(state)
+    if state == nil then
+        return
+    end
+
+    for _, sceneUiLayer in pairs(state.sceneUiLayersByRow or {}) do
+        if sceneUiLayer ~= nil then
+            pcall(function()
+                GameAPI.destroy_scene_ui(sceneUiLayer)
+            end)
+        end
+    end
+    state.sceneUiLayersByRow = {}
+end
+
+---@param shelfUnit Unit
+---@param shelfConfig table
+---@param state table
+local function createShelfRowButtons(shelfUnit, shelfConfig, state)
+    local layout = shelfConfig.layout
+    destroyShelfRowButtons(state)
+
+    for rowIndex = 1, layout.rowCount do
+        local rowButtonLocalOffset = buildRowButtonOffset(shelfConfig, rowIndex)
+        local rowButtonWorldOffset = buildRowButtonWorldOffset(shelfUnit, rowButtonLocalOffset)
+        ---@cast shelfUnit Obstacle
+        local sceneUiLayer = shelfUnit.create_scene_ui_bind_unit(
+            Prefab.scene_eui.DeploySceneUI,
+            SHELF_ROW_BUTTON_SOCKET,
+            rowButtonWorldOffset,
+            SHELF_ROW_BUTTON_DURATION,
+            true,
+            true
+        )
+        if sceneUiLayer ~= nil then
+            state.sceneUiLayersByRow[rowIndex] = sceneUiLayer
+        else
+            print(TAG, "create shelf row button scene ui failed, shelfId:", state.shelfId, "row:", rowIndex)
+        end
+    end
+end
+
+---@param shelfConfig table
 ---@param shelfUnit Unit
 ---@return Quaternion
 local function buildAttachmentRotation(shelfConfig, shelfUnit)
@@ -492,6 +564,7 @@ local function clearShelfAttachmentState(shelfUnit, state, destroyAttachments)
         state.timer:cancel()
         state.timer = nil
     end
+    destroyShelfRowButtons(state)
     if destroyAttachments then
         destroyAttachmentsInState(state)
     end
@@ -554,6 +627,7 @@ local function createShelfAttachmentState(shelfUnit, shelfId, totalCount)
         failedCount = 0,
         timer = nil,
         layers = {},
+        sceneUiLayersByRow = {},
         destroyed = false,
     }
     shelfAttachmentStates:set(shelfUnit, state)
@@ -629,8 +703,9 @@ local function spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
 end
 
 ---@param shelfUnit Unit
+---@param shelfConfig table
 ---@param state table
-local function onShelfSpawnFinished(shelfUnit, state)
+local function onShelfSpawnFinished(shelfUnit, shelfConfig, state)
     print(
         TAG,
         "create shelf attachments done, shelfId:",
@@ -643,6 +718,7 @@ local function onShelfSpawnFinished(shelfUnit, state)
         state.totalCount
     )
     GlobalAPI.show_tips("货架补货完成，数量: " .. tostring(state.spawnedCount), SUCCESS_TIPS_DURATION)
+    createShelfRowButtons(shelfUnit, shelfConfig, state)
 end
 
 ---@param shelfUnit Unit|nil
@@ -658,7 +734,7 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
     local state = createShelfAttachmentState(shelfUnit, shelfConfig.shelfId, totalCount)
     registerShelfDestroyEvents(shelfUnit, state)
     if totalCount == 0 then
-        onShelfSpawnFinished(shelfUnit, state)
+        onShelfSpawnFinished(shelfUnit, shelfConfig, state)
         return
     end
 
@@ -670,7 +746,7 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
             spawnSingleAttachment(shelfUnit, shelfConfig, state, task)
             if taskIndex == totalCount then
                 if not state.destroyed and shelfAttachmentStates:get(shelfUnit) == state then
-                    onShelfSpawnFinished(shelfUnit, state)
+                    onShelfSpawnFinished(shelfUnit, shelfConfig, state)
                 end
             end
         end
@@ -694,7 +770,7 @@ local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
         if nextTaskIndex >= totalCount then
             state.timer = nil
             if not state.destroyed and shelfAttachmentStates:get(shelfUnit) == state then
-                onShelfSpawnFinished(shelfUnit, state)
+                onShelfSpawnFinished(shelfUnit, shelfConfig, state)
             end
         end
     end)

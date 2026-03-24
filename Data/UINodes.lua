@@ -49,6 +49,7 @@ return {
 	DecBtn_2_2 = "1519736575|2032972116" --[[@as EButton]],
 	DecBtn_3_1 = "1519736575|1416015638" --[[@as EButton]],
 	DecBtn_3_2 = "1519736575|1770766503" --[[@as EButton]],
+	DeployBtn = "1519736575|1448814052" --[[@as EButton]],
 	ItemAmountFrame_1 = "1519736575|1861788283" --[[@as ELabel]],
 	ItemAmountFrame_2 = "1519736575|1452984806" --[[@as ELabel]],
 	ItemAmountFrame_3 = "1519736575|1365897314" --[[@as ELabel]],
@@ -130,6 +131,7 @@ return {
 	TestCreateBtn = "1519736575|1833476748" --[[@as EButton]],
 	TestKeyVisual = "1519736575|1511803957" --[[@as EImage]],
 	TestReleaseBtn = "1519736575|1109884778" --[[@as EButton]],
+	TestSceneUICreate = "1519736575|1065796149" --[[@as EButton]],
 	TestShelfCreate = "1519736575|1932931145" --[[@as EButton]],
 	TestShelfDestroy = "1519736575|1930191812" --[[@as EButton]],
 	TestTextUpdateBtn = "1519736575|1336654709" --[[@as EButton]],
@@ -149,5 +151,4 @@ return {
 	UnitPrice_3_1 = "1519736575|1401494120" --[[@as ELabel]],
 	UnitPrice_3_2 = "1519736575|1351609048" --[[@as ELabel]],
 	["画布0"] = "1519736575|1405255247" --[[@as ECanvas]],
-	["金色旋转"] = "1519736575|1015888394" --[[@as EAnimation]],
 }
