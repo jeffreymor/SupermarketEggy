@@ -8,7 +8,6 @@ local ItemAttConfig = require("Config.ItemAttConfig")
 local DEBUG_LOG_ENABLED = false -- 排障日志开关（默认关闭；定位箱子互动链路时再开启）
 local TEST_BOX_ID = Prefab.unit.FinalBox -- 箱子模型ID（Prefab.unit）
 local DEFAULT_QUATERNION = math.Quaternion(0.0, 0.0, 0.0) -- 默认旋转（DisplayComp.bind_model _rot）
-local DEFAULT_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 默认缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
 local BOX_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 箱子缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
 local BOX_BASE_POINT_OFFSET = math.Vector3(0.0, -0.6, 0.0) -- 箱子原点到底面的修正偏移（位置对齐，单位待确认）
 local BOX_TARGET_POSITION_OFFSET = math.Vector3(0.0, 0.0, 0.0) -- 人物前方落点附加偏移（正负方向同世界坐标，单位待确认）
@@ -31,80 +30,24 @@ local function debugLog(...)
     print(TAG, ...)
 end
 
----@param value any
----@return boolean
-local function isPlatformNumber(value)
-    local valueType = type(value)
-    return valueType == "number" or valueType == "Fixed"
-end
-
----@param value any
----@return number
-local function toRealNumber(value)
-    if type(value) == "Fixed" then
-        return math.toreal(value)
-    end
-    return value
-end
-
----@param fieldPath string
----@param value any
-local function logItemAttFieldError(fieldPath, value)
-    print(TAG, "invalid item att config field, field:", fieldPath, "value:", value, "type:", type(value))
-end
-
----@param fieldPath string
----@param value any
----@return number|nil
-local function parseNumber(fieldPath, value)
-    if not isPlatformNumber(value) then
-        logItemAttFieldError(fieldPath, value)
-        return nil
-    end
-    return toRealNumber(value)
-end
-
----@param fieldPath string
----@param value any
----@return integer|nil
-local function parsePositiveInteger(fieldPath, value)
-    if type(value) ~= "number" or value ~= math.floor(value) then
-        logItemAttFieldError(fieldPath, value)
-        return nil
-    end
-
-    local integerValue = math.tointeger(value)
-    if integerValue == nil or integerValue <= 0 then
-        logItemAttFieldError(fieldPath, value)
-        return nil
-    end
-    return integerValue
-end
-
 ---@return table[]|nil
 local function buildRuntimeItemAttConfigs()
-    local itemAttConfig = ItemAttConfig.get_item_config_by_id(nil)
+    local itemAttConfig = ItemAttConfig.getItemAttDefByItemId(nil)
     if itemAttConfig == nil then
-        print(TAG, "missing item att config")
+        print(TAG, "missing item att defi")
         return nil
     end
 
-    local itemUnitKey = parsePositiveInteger("itemUnitKey", itemAttConfig.itemUnitKey)
-    local itemCount = parsePositiveInteger("itemCount", itemAttConfig.itemCount)
-    local rowCount = parsePositiveInteger("rowCount", itemAttConfig.rowCount)
-    local xSpacing = parseNumber("xSpacing", itemAttConfig.xSpacing)
-    local zSpacing = parseNumber("zSpacing", itemAttConfig.zSpacing)
-    local yOffset = parseNumber("yOffset", itemAttConfig.yOffset)
-    if itemUnitKey == nil or itemCount == nil or rowCount == nil or xSpacing == nil or zSpacing == nil or yOffset == nil then
-        return nil
-    end
-
-    if xSpacing < 0.0 then
-        logItemAttFieldError("xSpacing", itemAttConfig.xSpacing)
-        return nil
-    end
-    if zSpacing < 0.0 then
-        logItemAttFieldError("zSpacing", itemAttConfig.zSpacing)
+    local itemId = itemAttConfig.itemId
+    local itemUnitKey = itemAttConfig.itemUnitKey
+    local itemScale = itemAttConfig.itemScale
+    local itemCount = itemAttConfig.itemCount
+    local rowCount = itemAttConfig.rowCount
+    local xSpacing = itemAttConfig.xSpacing
+    local zSpacing = itemAttConfig.zSpacing
+    local yOffset = itemAttConfig.yOffset
+    if itemId == nil or itemUnitKey == nil or itemScale == nil or itemCount == nil or rowCount == nil or xSpacing == nil or zSpacing == nil or yOffset == nil then
+        print(TAG, "invalid resolved item att defi, itemId:", itemId)
         return nil
     end
 
@@ -124,7 +67,9 @@ local function buildRuntimeItemAttConfigs()
         local rowZ = ((effectiveRowCount + 1) / 2.0 - rowIndex) * zSpacing
         runtimeItems[#runtimeItems + 1] = {
             index = slotIndex,
+            itemId = itemId,
             itemUnitKey = itemUnitKey,
+            itemScale = itemScale,
             localOffset = math.Vector3(rowX, yOffset, rowZ),
         }
     end
@@ -132,8 +77,8 @@ local function buildRuntimeItemAttConfigs()
     if #runtimeItems ~= itemCount then
         print(
             TAG,
-            "item att runtime count mismatch, configId:",
-            itemAttConfig.configId,
+            "item att runtime count mismatch, itemId:",
+            itemId,
             "expected:",
             itemCount,
             "actual:",
@@ -313,7 +258,7 @@ local function createFollowLayer(roleCtrlUnit, stackIndex)
             FOLLOW_SOCKET,
             itemOffset,
             DEFAULT_QUATERNION,
-            DEFAULT_SCALE
+            itemConfig.itemScale
         )
         if itemBindId == nil then
             unbindModels(roleCtrlUnit, { boxBindId })
@@ -361,7 +306,7 @@ local function createGroundItems(boxUnit)
             itemConfig.itemUnitKey,
             itemPosition,
             itemOrientation,
-            DEFAULT_SCALE
+            itemConfig.itemScale
         )
         if itemUnit == nil then
             destroyUnits(itemUnits)

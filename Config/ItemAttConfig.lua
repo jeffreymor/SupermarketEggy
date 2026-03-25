@@ -1,80 +1,162 @@
 local ItemAttConfig = {}
-local Prefab = require("Data.Prefab")
+local ItemConfig = require("Config.ItemConfig")
 local TAG = "[ItemAttConfig]"
 
-local CONFIG_IDS = {
-    DEFAULT = "DefaultFrontBoxLayout",
-    TWO_ROWS_FOUR = "TwoRowsFourItems",
-    TWO_ROWS_FIVE = "TwoRowsFiveItems",
-    THREE_ROWS_NINE = "ThreeRowsNineItems",
-}
+local ITEM_ID = ItemConfig.ITEM_ID
 
-ItemAttConfig.DEFAULT_CONFIG_ID = CONFIG_IDS.THREE_ROWS_NINE -- 默认 ItemAtt 排布配置标识（匹配 ITEM_CONFIGS[*].configId）
-
-ItemAttConfig.ITEM_CONFIGS = {
-    {
-        configId = CONFIG_IDS.DEFAULT, -- ItemAtt 排布配置标识（日志与排障定位）
-        itemUnitKey = Prefab.unit.TestItem, -- item 预制体（GameAPI.create_unit_with_scale/bind_model _u_key）
-        itemCount = 3, -- item 总数（自动排布输入，整数）
-        rowCount = 1, -- 行数（自动排布输入，整数）
-        xSpacing = 1.0, -- 同行横向间距（本地 x 轴，单位：米）
-        zSpacing = 1.0, -- 行间纵向间距（本地 z 轴，单位：米）
-        yOffset = 0.12, -- item 高度偏移（本地 y 轴，单位：米）
-    },
-    {
-        configId = CONFIG_IDS.TWO_ROWS_FOUR, -- ItemAtt 排布配置标识（日志与排障定位）
-        itemUnitKey = Prefab.unit.TestItem, -- item 预制体（GameAPI.create_unit_with_scale/bind_model _u_key）
-        itemCount = 4, -- item 总数（自动排布输入，整数）
+ItemAttConfig.ITEM_ATT_DEFI = {
+    [ITEM_ID.TEST_MILK_SHAKE] = {
         rowCount = 2, -- 行数（自动排布输入，整数）
         xSpacing = 1.0, -- 同行横向间距（本地 x 轴，单位：米）
         zSpacing = 1.0, -- 行间纵向间距（本地 z 轴，单位：米）
         yOffset = 0.12, -- item 高度偏移（本地 y 轴，单位：米）
     },
-    {
-        configId = CONFIG_IDS.TWO_ROWS_FIVE, -- ItemAtt 排布配置标识（日志与排障定位）
-        itemUnitKey = Prefab.unit.TestItem, -- item 预制体（GameAPI.create_unit_with_scale/bind_model _u_key）
-        itemCount = 5, -- item 总数（自动排布输入，整数）
+    [ITEM_ID.TEST_BOMB] = {
         rowCount = 2, -- 行数（自动排布输入，整数）
-        xSpacing = 1.0, -- 同行横向间距（本地 x 轴，单位：米）
-        zSpacing = 1.0, -- 行间纵向间距（本地 z 轴，单位：米）
-        yOffset = 0.12, -- item 高度偏移（本地 y 轴，单位：米）
-    },
-    {
-        configId = CONFIG_IDS.THREE_ROWS_NINE, -- ItemAtt 排布配置标识（日志与排障定位）
-        itemUnitKey = Prefab.unit.TestItem, -- item 预制体（GameAPI.create_unit_with_scale/bind_model _u_key）
-        itemCount = 9, -- item 总数（自动排布输入，整数）
-        rowCount = 3, -- 行数（自动排布输入，整数）
-        xSpacing = 1.0, -- 同行横向间距（本地 x 轴，单位：米）
-        zSpacing = 1.0, -- 行间纵向间距（本地 z 轴，单位：米）
+        xSpacing = 1.1, -- 同行横向间距（本地 x 轴，单位：米）
+        zSpacing = 1.1, -- 行间纵向间距（本地 z 轴，单位：米）
         yOffset = 0.12, -- item 高度偏移（本地 y 轴，单位：米）
     },
 }
 
----@param configId string|nil
----@return table|nil
-function ItemAttConfig.get_item_config_by_id(configId)
-    local targetConfigId = configId
-    if targetConfigId == nil then
-        targetConfigId = ItemAttConfig.DEFAULT_CONFIG_ID
+---@param value any
+---@return boolean
+local function isPlatformNumber(value)
+    local valueType = type(value)
+    return valueType == "number" or valueType == "Fixed"
+end
+
+---@param value any
+---@return number
+local function toRealNumber(value)
+    if type(value) == "Fixed" then
+        return math.toreal(value)
     end
+    return value
+end
 
-    if type(targetConfigId) ~= "string" or targetConfigId == "" then
-        print(TAG, "invalid configId:", targetConfigId, "type:", type(targetConfigId))
+---@param itemId string
+---@param fieldPath string
+---@param value any
+local function logItemAttFieldError(itemId, fieldPath, value)
+    print(TAG, "invalid item att config field, itemId:", itemId, "field:", fieldPath, "value:", value, "type:", type(value))
+end
+
+---@param itemId string
+---@param fieldPath string
+---@param value any
+---@return integer|nil
+local function parsePositiveInteger(itemId, fieldPath, value)
+    if type(value) ~= "number" or value ~= math.floor(value) then
+        logItemAttFieldError(itemId, fieldPath, value)
         return nil
     end
 
-    for _, config in ipairs(ItemAttConfig.ITEM_CONFIGS or {}) do
-        if config.configId == targetConfigId then
-            return config
-        end
+    local integerValue = math.tointeger(value)
+    if integerValue == nil or integerValue <= 0 then
+        logItemAttFieldError(itemId, fieldPath, value)
+        return nil
+    end
+    return integerValue
+end
+
+---@param itemId string
+---@param fieldPath string
+---@param value any
+---@return number|nil
+local function parseNumber(itemId, fieldPath, value)
+    if not isPlatformNumber(value) then
+        logItemAttFieldError(itemId, fieldPath, value)
+        return nil
+    end
+    return toRealNumber(value)
+end
+
+---@param itemId string
+---@param itemAttDef table
+---@return table|nil
+local function resolveItemAttDef(itemId, itemAttDef)
+    local itemDef = ItemConfig.getItemById(itemId)
+    if itemDef == nil then
+        print(TAG, "missing item definition, itemId:", itemId)
+        return nil
     end
 
-    if configId == nil then
-        print(TAG, "default item att config not found, defaultConfigId:", targetConfigId)
-    else
-        print(TAG, "item att config not found, configId:", targetConfigId)
+    local itemUnitKey = itemDef.itemPrefab
+    if type(itemUnitKey) ~= "number" or itemUnitKey ~= math.floor(itemUnitKey) then
+        print(
+            TAG,
+            "invalid item prefab unit key, itemId:",
+            itemId,
+            "value:",
+            itemUnitKey,
+            "type:",
+            type(itemUnitKey)
+        )
+        return nil
     end
-    return nil
+
+    local unitKeyInteger = math.tointeger(itemUnitKey)
+    if unitKeyInteger == nil or unitKeyInteger <= 0 then
+        print(TAG, "invalid integer item unit key, itemId:", itemId, "value:", itemUnitKey)
+        return nil
+    end
+
+    local itemScale = itemDef.itemScale
+    if itemScale == nil then
+        print(TAG, "invalid item scale, itemId:", itemId, "value:", itemScale, "type:", type(itemScale))
+        return nil
+    end
+
+    local itemCount = parsePositiveInteger(itemId, "itemCount", itemDef.itemCount)
+    local rowCount = parsePositiveInteger(itemId, "rowCount", itemAttDef.rowCount)
+    local xSpacing = parseNumber(itemId, "xSpacing", itemAttDef.xSpacing)
+    local zSpacing = parseNumber(itemId, "zSpacing", itemAttDef.zSpacing)
+    local yOffset = parseNumber(itemId, "yOffset", itemAttDef.yOffset)
+    if itemCount == nil or rowCount == nil or xSpacing == nil or zSpacing == nil or yOffset == nil then
+        return nil
+    end
+    if xSpacing < 0.0 then
+        logItemAttFieldError(itemId, "xSpacing", itemAttDef.xSpacing)
+        return nil
+    end
+    if zSpacing < 0.0 then
+        logItemAttFieldError(itemId, "zSpacing", itemAttDef.zSpacing)
+        return nil
+    end
+
+    return {
+        itemId = itemId,
+        itemUnitKey = unitKeyInteger,
+        itemScale = itemScale,
+        itemCount = itemCount,
+        rowCount = rowCount,
+        xSpacing = xSpacing,
+        zSpacing = zSpacing,
+        yOffset = yOffset,
+    }
+end
+
+---@param itemId string|nil
+---@return table|nil
+function ItemAttConfig.getItemAttDefByItemId(itemId)
+    local targetItemId = itemId
+    if targetItemId == nil then
+        targetItemId = ItemConfig.DEFAULT_ITEM_ID
+    end
+
+    if type(targetItemId) ~= "string" or targetItemId == "" then
+        print(TAG, "invalid itemId:", targetItemId, "type:", type(targetItemId))
+        return nil
+    end
+
+    local itemAttDef = (ItemAttConfig.ITEM_ATT_DEFI or {})[targetItemId]
+    if itemAttDef == nil then
+        print(TAG, "item att defi not found, itemId:", targetItemId)
+        return nil
+    end
+
+    return resolveItemAttDef(targetItemId, itemAttDef)
 end
 
 return ItemAttConfig
