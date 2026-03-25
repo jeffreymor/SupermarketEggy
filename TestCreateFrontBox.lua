@@ -3,16 +3,13 @@ local TestCreateFrontBox = {}
 local TAG = "[TestCreateFrontBox]"
 local Prefab = require("Data.Prefab")
 local UINodes = require("Data.UINodes")
+local ItemAttConfig = require("Config.ItemAttConfig")
 
 local DEBUG_LOG_ENABLED = false -- 排障日志开关（默认关闭；定位箱子互动链路时再开启）
 local TEST_BOX_ID = Prefab.unit.FinalBox -- 箱子模型ID（Prefab.unit）
-local TEST_ITEM_ID = Prefab.unit.TestItem -- 箱内物品模型ID（Prefab.unit）
 local DEFAULT_QUATERNION = math.Quaternion(0.0, 0.0, 0.0) -- 默认旋转（DisplayComp.bind_model _rot）
 local DEFAULT_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 默认缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
 local BOX_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 箱子缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
-local ITEM_LOCAL_OFFSET = math.Vector3(0.0, 0.0, 0.0) -- item 相对箱子局部中心偏移（Unit.get_local_offset_position，单位待确认）
-local ITEM_SIDE_DISTANCE = 1.0 -- item 左右间距（Enums.DirectionType.LEFT/RIGHT，单位待确认）
-local ITEM_EXTRA_HEIGHT_OFFSET = 0.12 -- item 额外抬高偏移（+Y，单位待确认）
 local BOX_BASE_POINT_OFFSET = math.Vector3(0.0, -0.6, 0.0) -- 箱子原点到底面的修正偏移（位置对齐，单位待确认）
 local BOX_TARGET_POSITION_OFFSET = math.Vector3(0.0, 0.0, 0.0) -- 人物前方落点附加偏移（正负方向同世界坐标，单位待确认）
 local CREATE_FORWARD_DISTANCE = 2.0 -- 箱子生成人物前方距离（Enums.DirectionType.FORWARD，单位待确认）
@@ -22,6 +19,8 @@ local BOX_LAYER_BASE_OFFSET = math.Vector3(0.0, 1.0, 0.0) -- 第 0 层箱子相�
 
 local groundBoxStates = dict()
 local roleFollowStates = dict()
+local cachedItemAttConfigs = nil
+local itemAttConfigLoadFailed = false
 
 ---@alias Node string
 
@@ -30,6 +29,137 @@ local function debugLog(...)
         return
     end
     print(TAG, ...)
+end
+
+---@param value any
+---@return boolean
+local function isPlatformNumber(value)
+    local valueType = type(value)
+    return valueType == "number" or valueType == "Fixed"
+end
+
+---@param value any
+---@return number
+local function toRealNumber(value)
+    if type(value) == "Fixed" then
+        return math.toreal(value)
+    end
+    return value
+end
+
+---@param fieldPath string
+---@param value any
+local function logItemAttFieldError(fieldPath, value)
+    print(TAG, "invalid item att config field, field:", fieldPath, "value:", value, "type:", type(value))
+end
+
+---@param fieldPath string
+---@param value any
+---@return number|nil
+local function parseNumber(fieldPath, value)
+    if not isPlatformNumber(value) then
+        logItemAttFieldError(fieldPath, value)
+        return nil
+    end
+    return toRealNumber(value)
+end
+
+---@param fieldPath string
+---@param value any
+---@return integer|nil
+local function parsePositiveInteger(fieldPath, value)
+    if type(value) ~= "number" or value ~= math.floor(value) then
+        logItemAttFieldError(fieldPath, value)
+        return nil
+    end
+
+    local integerValue = math.tointeger(value)
+    if integerValue == nil or integerValue <= 0 then
+        logItemAttFieldError(fieldPath, value)
+        return nil
+    end
+    return integerValue
+end
+
+---@return table[]|nil
+local function buildRuntimeItemAttConfigs()
+    local itemAttConfig = ItemAttConfig.get_item_config_by_id(nil)
+    if itemAttConfig == nil then
+        print(TAG, "missing item att config")
+        return nil
+    end
+
+    local itemUnitKey = parsePositiveInteger("itemUnitKey", itemAttConfig.itemUnitKey)
+    local itemCount = parsePositiveInteger("itemCount", itemAttConfig.itemCount)
+    local rowCount = parsePositiveInteger("rowCount", itemAttConfig.rowCount)
+    local xSpacing = parseNumber("xSpacing", itemAttConfig.xSpacing)
+    local zSpacing = parseNumber("zSpacing", itemAttConfig.zSpacing)
+    local yOffset = parseNumber("yOffset", itemAttConfig.yOffset)
+    if itemUnitKey == nil or itemCount == nil or rowCount == nil or xSpacing == nil or zSpacing == nil or yOffset == nil then
+        return nil
+    end
+
+    if xSpacing < 0.0 then
+        logItemAttFieldError("xSpacing", itemAttConfig.xSpacing)
+        return nil
+    end
+    if zSpacing < 0.0 then
+        logItemAttFieldError("zSpacing", itemAttConfig.zSpacing)
+        return nil
+    end
+
+    local effectiveRowCount = rowCount
+    if itemCount < effectiveRowCount then
+        effectiveRowCount = itemCount
+    end
+
+    local perRow = (itemCount + effectiveRowCount - 1) // effectiveRowCount
+
+    local runtimeItems = {}
+    for slotIndex = 1, itemCount do
+        local slotOffset = slotIndex - 1
+        local rowIndex = slotOffset // perRow + 1
+        local columnIndex = slotOffset % perRow + 1
+        local rowX = (columnIndex - (perRow + 1) / 2.0) * xSpacing
+        local rowZ = ((effectiveRowCount + 1) / 2.0 - rowIndex) * zSpacing
+        runtimeItems[#runtimeItems + 1] = {
+            index = slotIndex,
+            itemUnitKey = itemUnitKey,
+            localOffset = math.Vector3(rowX, yOffset, rowZ),
+        }
+    end
+
+    if #runtimeItems ~= itemCount then
+        print(
+            TAG,
+            "item att runtime count mismatch, configId:",
+            itemAttConfig.configId,
+            "expected:",
+            itemCount,
+            "actual:",
+            #runtimeItems
+        )
+        return nil
+    end
+
+    return runtimeItems
+end
+
+---@return table[]|nil
+local function getItemAttConfigs()
+    if cachedItemAttConfigs ~= nil then
+        return cachedItemAttConfigs
+    end
+    if itemAttConfigLoadFailed then
+        return nil
+    end
+
+    cachedItemAttConfigs = buildRuntimeItemAttConfigs()
+    if cachedItemAttConfigs == nil then
+        itemAttConfigLoadFailed = true
+        return nil
+    end
+    return cachedItemAttConfigs
 end
 
 ---@param targetUnits Unit[]|nil
@@ -111,26 +241,9 @@ local function getGroundBoxOrientation(roleCtrlUnit)
 end
 
 ---@param stackIndex integer
----@return Vector3, Vector3[]
-local function getLayerOffsets(stackIndex)
-    local boxOffset = BOX_LAYER_BASE_OFFSET + math.Vector3(0.0, stackIndex * FOLLOW_STACK_HEIGHT_STEP, 0.0)
-    local itemCenterOffset = boxOffset + ITEM_LOCAL_OFFSET + math.Vector3(0.0, ITEM_EXTRA_HEIGHT_OFFSET, 0.0)
-    return boxOffset, {
-        itemCenterOffset,
-        itemCenterOffset + math.Vector3(-ITEM_SIDE_DISTANCE, 0.0, 0.0),
-        itemCenterOffset + math.Vector3(ITEM_SIDE_DISTANCE, 0.0, 0.0),
-    }
-end
-
----@param boxUnit Unit
----@return Vector3[]
-local function getGroundItemPositions(boxUnit)
-    local centerPosition = boxUnit.get_local_offset_position(ITEM_LOCAL_OFFSET + math.Vector3(0.0, ITEM_EXTRA_HEIGHT_OFFSET, 0.0))
-    return {
-        centerPosition,
-        centerPosition + boxUnit.get_local_direction(Enums.DirectionType.LEFT) * ITEM_SIDE_DISTANCE,
-        centerPosition + boxUnit.get_local_direction(Enums.DirectionType.RIGHT) * ITEM_SIDE_DISTANCE,
-    }
+---@return Vector3
+local function getLayerBoxOffset(stackIndex)
+    return BOX_LAYER_BASE_OFFSET + math.Vector3(0.0, stackIndex * FOLLOW_STACK_HEIGHT_STEP, 0.0)
 end
 
 ---@param roleCtrlUnit Character
@@ -178,7 +291,13 @@ end
 ---@param stackIndex integer
 ---@return table|nil
 local function createFollowLayer(roleCtrlUnit, stackIndex)
-    local boxOffset, itemOffsets = getLayerOffsets(stackIndex)
+    local itemConfigs = getItemAttConfigs()
+    if itemConfigs == nil then
+        print(TAG, "missing item att configs for follow layer")
+        return nil
+    end
+
+    local boxOffset = getLayerBoxOffset(stackIndex)
     local boxBindId = roleCtrlUnit.bind_model(TEST_BOX_ID, FOLLOW_SOCKET, boxOffset, DEFAULT_QUATERNION, BOX_SCALE)
     if boxBindId == nil then
         print(TAG, "bind box failed at layer:", stackIndex)
@@ -186,12 +305,20 @@ local function createFollowLayer(roleCtrlUnit, stackIndex)
     end
 
     local itemBindIds = {}
-    for itemIndex, itemOffset in ipairs(itemOffsets) do
-        local itemBindId = roleCtrlUnit.bind_model(TEST_ITEM_ID, FOLLOW_SOCKET, itemOffset, DEFAULT_QUATERNION, DEFAULT_SCALE)
+    for itemIndex, itemConfig in ipairs(itemConfigs) do
+        local runtimeItemIndex = itemConfig.index or itemIndex
+        local itemOffset = boxOffset + itemConfig.localOffset
+        local itemBindId = roleCtrlUnit.bind_model(
+            itemConfig.itemUnitKey,
+            FOLLOW_SOCKET,
+            itemOffset,
+            DEFAULT_QUATERNION,
+            DEFAULT_SCALE
+        )
         if itemBindId == nil then
             unbindModels(roleCtrlUnit, { boxBindId })
             unbindModels(roleCtrlUnit, itemBindIds)
-            print(TAG, "bind item failed at layer:", stackIndex, "index:", itemIndex)
+            print(TAG, "bind item failed at layer:", stackIndex, "index:", runtimeItemIndex)
             return nil
         end
         itemBindIds[#itemBindIds + 1] = itemBindId
@@ -219,12 +346,23 @@ end
 ---@param boxUnit Unit
 ---@return Unit[]|nil, JointAssistant[]|nil
 local function createGroundItems(boxUnit)
+    local itemConfigs = getItemAttConfigs()
+    if itemConfigs == nil then
+        print(TAG, "missing item att configs for ground items")
+        return nil
+    end
+
     local itemOrientation = boxUnit.get_orientation()
-    local itemPositions = getGroundItemPositions(boxUnit)
     local itemUnits = {}
 
-    for _, itemPosition in ipairs(itemPositions) do
-        local itemUnit = GameAPI.create_unit_with_scale(TEST_ITEM_ID, itemPosition, itemOrientation, DEFAULT_SCALE)
+    for _, itemConfig in ipairs(itemConfigs) do
+        local itemPosition = boxUnit.get_local_offset_position(itemConfig.localOffset)
+        local itemUnit = GameAPI.create_unit_with_scale(
+            itemConfig.itemUnitKey,
+            itemPosition,
+            itemOrientation,
+            DEFAULT_SCALE
+        )
         if itemUnit == nil then
             destroyUnits(itemUnits)
             return nil
