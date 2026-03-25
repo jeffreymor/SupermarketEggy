@@ -1,6 +1,6 @@
-local TestAttactmentHelper = {}
+local TestAttachmentHelper = {}
 
-local TAG = "[TestAttactmentHelper]"
+local TAG = "[TestAttachmentHelper]"
 local Timer = require("Utils.Timer")
 local UINodes = require("Data.UINodes")
 local Prefab = require("Data.Prefab")
@@ -532,7 +532,6 @@ local function popNextShelfToDestroy()
     return shelfUnit
 end
 
----@param shelfUnit Unit
 ---@param state table
 local function destroyAttachmentsInState(state)
     for _, rowLayers in pairs(state.layers or {}) do
@@ -796,7 +795,7 @@ local function destroyNextShelf(actor, data)
     GlobalAPI.show_tips("已销毁队首货架，剩余: " .. tostring(#shelfDestroyQueue), SUCCESS_TIPS_DURATION)
 end
 
-function TestAttactmentHelper.init()
+function TestAttachmentHelper.init()
     if inited then
         return
     end
@@ -899,4 +898,4 @@ function TestAttactmentHelper.init()
     inited = true
 end
 
-return TestAttactmentHelper
+return TestAttachmentHelper
