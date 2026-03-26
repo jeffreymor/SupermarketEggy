@@ -10,7 +10,7 @@ local ITEM_ID = {
 
 local DEFAULT_ITEM_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 物品默认缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
 
-ItemConfig.DEFAULT_ITEM_ID = ITEM_ID.TEST_BOMB -- 默认 item 标识（通用默认选择）
+ItemConfig.DEFAULT_ITEM_ID = ITEM_ID.TEST_MILK_SHAKE -- 默认 item 标识（通用默认选择）
 
 local ITEM_DEFI = {
     [ITEM_ID.TEST_MILK_SHAKE] = {

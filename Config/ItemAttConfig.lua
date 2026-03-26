@@ -73,6 +73,26 @@ local function parseNumber(itemId, fieldPath, value)
 end
 
 ---@param itemId string
+---@param fieldPath string
+---@param value any
+---@return Vector3|nil
+local function parseVector3(itemId, fieldPath, value)
+    if type(value) ~= "table" then
+        logItemAttFieldError(itemId, fieldPath, value)
+        return nil
+    end
+
+    local x = parseNumber(itemId, fieldPath .. ".x", value.x)
+    local y = parseNumber(itemId, fieldPath .. ".y", value.y)
+    local z = parseNumber(itemId, fieldPath .. ".z", value.z)
+    if x == nil or y == nil or z == nil then
+        return nil
+    end
+
+    return math.Vector3(x, y, z)
+end
+
+---@param itemId string
 ---@param itemAttDef table
 ---@return table|nil
 local function resolveItemAttDef(itemId, itemAttDef)
@@ -102,9 +122,8 @@ local function resolveItemAttDef(itemId, itemAttDef)
         return nil
     end
 
-    local itemScale = itemDef.itemScale
+    local itemScale = parseVector3(itemId, "itemScale", itemDef.itemScale)
     if itemScale == nil then
-        print(TAG, "invalid item scale, itemId:", itemId, "value:", itemScale, "type:", type(itemScale))
         return nil
     end
 

@@ -439,6 +439,63 @@ local function buildRowButtonWorldOffset(shelfUnit, rowButtonLocalOffset)
     return rowButtonWorldPosition - shelfWorldPosition
 end
 
+---@param nodeId ENode|string
+---@return string
+local function normalizeDeployNodeIdForMatch(nodeId)
+    -- 引擎回调里的 nodeToken 可能省略前缀（如 1519736575|1448814052 -> 1448814052），这里统一归一化以保证映射可命中。
+    local rawNodeId = tostring(nodeId)
+    local uiType, sceneUiId, nodeToken = string.match(rawNodeId, "^([^@]+)@([^@]+)@(.+)$")
+    if uiType == nil or sceneUiId == nil or nodeToken == nil then
+        return rawNodeId
+    end
+
+    local normalizedNodeToken = nodeToken
+    local separatorIndex = string.find(nodeToken, "|", 1, true)
+    if separatorIndex ~= nil and separatorIndex < #nodeToken then
+        normalizedNodeToken = string.sub(nodeToken, separatorIndex + 1)
+    end
+
+    return uiType .. "@" .. sceneUiId .. "@" .. normalizedNodeToken
+end
+
+---@param state table
+---@param sceneUiLayer E3DLayer
+---@param rowIndex integer
+local function registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
+    local deployBtnNodeId = UINodes.DeployBtn
+    if deployBtnNodeId == nil then
+        print(TAG, "missing ui node: DeployBtn, shelfId:", state.shelfId, "row:", rowIndex)
+        return
+    end
+
+    local deployBtnNode = GameAPI.get_eui_node_at_scene_ui(sceneUiLayer, deployBtnNodeId)
+    if deployBtnNode == nil then
+        print(TAG, "missing scene ui node: DeployBtn, shelfId:", state.shelfId, "row:", rowIndex)
+        return
+    end
+
+    if state.deployBtnRowByNodeId == nil then
+        state.deployBtnRowByNodeId = {}
+    end
+
+    local exactNodeKey = tostring(deployBtnNode)
+    local normalizedNodeKey = normalizeDeployNodeIdForMatch(deployBtnNode)
+    -- 同时保存 exact + normalized，回调先 exact 再 normalized，兼容不同来源的 nodeId 形态。
+    state.deployBtnRowByNodeId[exactNodeKey] = rowIndex
+    state.deployBtnRowByNodeId[normalizedNodeKey] = rowIndex
+    print(
+        TAG,
+        "register deploy button mapping, shelfId:",
+        state.shelfId,
+        "rowIndex:",
+        rowIndex,
+        "exactNodeId:",
+        exactNodeKey,
+        "normalizedNodeId:",
+        normalizedNodeKey
+    )
+end
+
 ---@param state table|nil
 local function destroyShelfRowButtons(state)
     if state == nil then
@@ -453,6 +510,8 @@ local function destroyShelfRowButtons(state)
         end
     end
     state.sceneUiLayersByRow = {}
+    state.deployBtnRowByNodeId = {}
+    state.deployBtnWarnedUnknownNodeById = {}
 end
 
 ---@param shelfUnit Unit
@@ -461,6 +520,8 @@ end
 local function createShelfRowButtons(shelfUnit, shelfConfig, state)
     local layout = shelfConfig.layout
     destroyShelfRowButtons(state)
+    state.deployBtnRowByNodeId = {}
+    state.deployBtnWarnedUnknownNodeById = {}
 
     for rowIndex = 1, layout.rowCount do
         local rowButtonLocalOffset = buildRowButtonOffset(shelfConfig, rowIndex)
@@ -471,15 +532,79 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
             SHELF_ROW_BUTTON_SOCKET,
             rowButtonWorldOffset,
             SHELF_ROW_BUTTON_DURATION,
-            true,
             true
         )
         if sceneUiLayer ~= nil then
             state.sceneUiLayersByRow[rowIndex] = sceneUiLayer
+            registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
         else
             print(TAG, "create shelf row button scene ui failed, shelfId:", state.shelfId, "row:", rowIndex)
         end
     end
+
+    if state.deployBtnCustomEventRegistered then
+        return
+    end
+    state.deployBtnCustomEventRegistered = true
+
+    -- DeployBtn 点击由 SceneUI 编辑器硬编码为 "DeployBtnClicked" 自定义事件，运行时通过 unit 事件分发，不走动态节点触摸注册（暂无法实现）
+    -- 事件回调里通过 nodeId 映射到行索引，兼容不同来源的 nodeId 形态（如引擎回调可能省略前缀）
+    LuaAPI.unit_register_custom_event(shelfUnit, "DeployBtnClicked", function(_, actor, data)
+        if data == nil then
+            print(TAG, "DeployBtnClicked data nil, shelfId:", state.shelfId, "actor:", actor)
+            return
+        end
+        if state.destroyed or shelfAttachmentStates:get(shelfUnit) ~= state then
+            return
+        end
+
+        local nodeId = data.eui_node_id
+        if nodeId == nil then
+            print(TAG, "DeployBtnClicked missing eui_node_id, shelfId:", state.shelfId, "actor:", actor)
+            return
+        end
+
+        local rawNodeKey = tostring(nodeId)
+        local normalizedNodeKey = normalizeDeployNodeIdForMatch(nodeId)
+        local rowIndex = state.deployBtnRowByNodeId[rawNodeKey]
+        local matchedBy = "exact"
+        if rowIndex == nil then
+            rowIndex = state.deployBtnRowByNodeId[normalizedNodeKey]
+            matchedBy = "normalized"
+        end
+
+        if rowIndex == nil then
+            if state.deployBtnWarnedUnknownNodeById[normalizedNodeKey] ~= true then
+                state.deployBtnWarnedUnknownNodeById[normalizedNodeKey] = true
+                print(
+                    TAG,
+                    "DeployBtnClicked unknown node, shelfId:",
+                    state.shelfId,
+                    "rawNodeId:",
+                    rawNodeKey,
+                    "normalizedNodeId:",
+                    normalizedNodeKey,
+                    "actor:",
+                    actor
+                )
+            end
+            return
+        end
+
+        print(
+            TAG,
+            "deploy button touched, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "rawNodeId:",
+            rawNodeKey,
+            "normalizedNodeId:",
+            normalizedNodeKey,
+            "matchedBy:",
+            matchedBy
+        )
+    end)
 end
 
 ---@param shelfConfig table
@@ -627,6 +752,9 @@ local function createShelfAttachmentState(shelfUnit, shelfId, totalCount)
         timer = nil,
         layers = {},
         sceneUiLayersByRow = {},
+        deployBtnRowByNodeId = {},
+        deployBtnWarnedUnknownNodeById = {},
+        deployBtnCustomEventRegistered = false,
         destroyed = false,
     }
     shelfAttachmentStates:set(shelfUnit, state)

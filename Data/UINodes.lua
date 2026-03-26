@@ -128,6 +128,7 @@ return {
 	ShopList = "1519736575|1140379592" --[[@as EList]],
 	Test = "1519736575|1772889342" --[[@as ECanvas]],
 	TestAttachmentCreate = "1519736575|1812597729" --[[@as EButton]],
+	TestBtn = "1519736575|1054697106" --[[@as EButton]],
 	TestCreateBtn = "1519736575|1833476748" --[[@as EButton]],
 	TestKeyVisual = "1519736575|1511803957" --[[@as EImage]],
 	TestReleaseBtn = "1519736575|1109884778" --[[@as EButton]],
