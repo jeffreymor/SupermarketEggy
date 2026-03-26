@@ -5,6 +5,7 @@ local Timer = require("Utils.Timer")
 local UINodes = require("Data.UINodes")
 local Prefab = require("Data.Prefab")
 local ShelfAttachmentConfig = require("Config.ShelfAttachmentConfig")
+local TestCreateFrontBox = require("TestCreateFrontBox")
 
 local SUCCESS_TIPS_DURATION = 2.0 -- 成功提示时长（GlobalAPI.show_tips _duration，单位：秒）
 local ERROR_TIPS_DURATION = 3.0 -- 失败提示时长（GlobalAPI.show_tips _duration，单位：秒）
@@ -14,6 +15,8 @@ local DEFAULT_ROTATION_OFFSET = math.Quaternion(0.0, 0.0, 0.0) -- 默认旋转�
 local SHELF_ROW_BUTTON_SIDE_GAP = 2.0 -- 每层按钮相对最右 Attachment 的横向外移（buildLocalOffset 列轴本地偏移，单位：米）
 local SHELF_ROW_BUTTON_DURATION = -1.0 -- 每层按钮 SceneUI 持续时长（SceneUI.create_scene_ui_bind_unit _duration，-1 常驻）
 local SHELF_ROW_BUTTON_SOCKET = Enums.ModelSocket.socket_body -- 每层按钮 SceneUI 绑定挂点（SceneUI.create_scene_ui_bind_unit _socket_name）
+local DEPLOY_BUSY_KV_KEY = "test_attachment_deploy_busy" -- 玩家上架互斥状态键（KVBase.set_kv_by_type/get_kv_by_type）
+local DEPLOY_STEP_INTERVAL_SEC = 0.2 -- 自动上架单步间隔（Timer.new duration，单位：秒）
 
 local AXIS_ENUM = {
     x = true,
@@ -23,6 +26,8 @@ local AXIS_ENUM = {
 
 local shelfAttachmentStates = dict()
 local shelfDestroyQueue = {}
+local roleDeployBusyStates = dict()
+local roleDeployTimers = dict()
 local inited = false
 
 local function debugLog(...)
@@ -328,6 +333,24 @@ local function loadEnableSlowSpawn()
     return enableSlowSpawn
 end
 
+---@return boolean|nil
+local function loadDeployTouchUseSuffix()
+    local deployTouchUseSuffix = ShelfAttachmentConfig.DEPLOY_TOUCH_USE_SUFFIX
+    if type(deployTouchUseSuffix) ~= "boolean" then
+        print(
+            TAG,
+            "invalid config field, field: DEPLOY_TOUCH_USE_SUFFIX",
+            "value:",
+            deployTouchUseSuffix,
+            "type:",
+            type(deployTouchUseSuffix)
+        )
+        return nil
+    end
+
+    return deployTouchUseSuffix
+end
+
 ---@param shelfId string|nil
 ---@return table|nil
 ---@return string|nil
@@ -458,6 +481,382 @@ local function normalizeDeployNodeIdForMatch(nodeId)
     return uiType .. "@" .. sceneUiId .. "@" .. normalizedNodeToken
 end
 
+---@param nodeId ENode|string|nil
+---@return string|nil
+local function extractNodeIdSuffix(nodeId)
+    if type(nodeId) ~= "string" or nodeId == "" then
+        return nil
+    end
+
+    local separatorIndex = string.find(nodeId, "|", 1, true)
+    if separatorIndex == nil or separatorIndex >= #nodeId then
+        return nil
+    end
+
+    return string.sub(nodeId, separatorIndex + 1)
+end
+
+---@param state table
+---@param rowIndex integer
+---@return integer|nil
+local function getNextDeployLayerIndex(state, rowIndex)
+    local nextDeployLayerByRow = state.nextDeployLayerByRow
+    if nextDeployLayerByRow == nil then
+        return nil
+    end
+
+    local nextLayerIndex = nextDeployLayerByRow[rowIndex]
+    if type(nextLayerIndex) ~= "number" or nextLayerIndex ~= math.floor(nextLayerIndex) then
+        return nil
+    end
+    if nextLayerIndex < 1 then
+        return nil
+    end
+    return math.tointeger(nextLayerIndex)
+end
+
+---@param state table
+---@param rowIndex integer
+---@param layerIndex integer
+local function markShelfRowLayerOccupied(state, rowIndex, layerIndex)
+    state.nextDeployLayerByRow[rowIndex] = layerIndex + 1
+
+    local rowLayers = state.layers[rowIndex]
+    if rowLayers == nil then
+        rowLayers = {}
+        state.layers[rowIndex] = rowLayers
+    end
+
+    local attachmentInfo = rowLayers[layerIndex]
+    if attachmentInfo == nil then
+        attachmentInfo = {
+            rowIndex = rowIndex,
+            layerIndex = layerIndex,
+            columnIndex = layerIndex,
+            anchorUnit = nil,
+            deployedItemUnit = nil,
+            occupied = false,
+        }
+        rowLayers[layerIndex] = attachmentInfo
+    end
+
+    attachmentInfo.occupied = true
+end
+
+---@param role Role|nil
+---@return Character|nil
+local function getRoleCtrlUnitForDeploy(role)
+    if role == nil then
+        return nil
+    end
+
+    return role.get_ctrl_unit()
+end
+
+---@param roleCtrlUnit Character|nil
+---@param busy boolean
+local function setRoleDeployBusyState(roleCtrlUnit, busy)
+    if roleCtrlUnit == nil then
+        return
+    end
+
+    local busyState = busy == true
+    roleDeployBusyStates:set(roleCtrlUnit, busyState)
+    pcall(function()
+        roleCtrlUnit.set_kv_by_type(Enums.ValueType.Bool, DEPLOY_BUSY_KV_KEY, busyState)
+    end)
+end
+
+---@param roleCtrlUnit Character|nil
+---@return boolean
+local function isRoleDeployBusy(roleCtrlUnit)
+    if roleCtrlUnit == nil then
+        return false
+    end
+
+    if roleDeployBusyStates:get(roleCtrlUnit) == true then
+        return true
+    end
+
+    local kvBusy = false
+    local kvReadOk = pcall(function()
+        kvBusy = roleCtrlUnit.get_kv_by_type(Enums.ValueType.Bool, DEPLOY_BUSY_KV_KEY) == true
+    end)
+    return kvReadOk and kvBusy
+end
+
+---@param roleCtrlUnit Character|nil
+local function clearRoleDeployTimer(roleCtrlUnit)
+    if roleCtrlUnit == nil then
+        return
+    end
+
+    local runningTimer = roleDeployTimers:get(roleCtrlUnit)
+    if runningTimer ~= nil then
+        runningTimer:cancel()
+    end
+    roleDeployTimers:set(roleCtrlUnit, nil)
+end
+
+---@param role Role|nil
+---@return table|nil
+local function consumeItemForDeploy(role)
+    local consumedItem, errCode = TestCreateFrontBox.consumeFollowBoxItemByRole(role)
+    if consumedItem ~= nil then
+        return consumedItem
+    end
+
+    if errCode == "missing_role" or errCode == "missing_ctrl_unit" then
+        GlobalAPI.show_tips("角色信息缺失，无法上架", ERROR_TIPS_DURATION)
+    elseif errCode == "no_follow_box" or errCode == "follow_box_empty" then
+        GlobalAPI.show_tips("无可用箱子货物", ERROR_TIPS_DURATION)
+    else
+        GlobalAPI.show_tips("箱子货物扣减失败", ERROR_TIPS_DURATION)
+    end
+    return nil
+end
+
+---@param state table
+---@param rowIndex integer
+---@param layerIndex integer
+---@param consumedItem table
+---@return boolean
+local function deployItemToTargetLayer(state, rowIndex, layerIndex, consumedItem)
+    markShelfRowLayerOccupied(state, rowIndex, layerIndex)
+    local rowLayers = state.layers[rowIndex]
+    local attachmentInfo = nil
+    if rowLayers ~= nil then
+        attachmentInfo = rowLayers[layerIndex]
+    end
+
+    if attachmentInfo == nil or attachmentInfo.anchorUnit == nil then
+        print(
+            TAG,
+            "missing deploy anchor, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "layerIndex:",
+            layerIndex,
+            "itemIndex:",
+            consumedItem.itemIndex
+        )
+        return false
+    end
+
+    local deployedItemUnit = GameAPI.create_unit_with_scale(
+        consumedItem.itemUnitKey,
+        attachmentInfo.anchorUnit.get_position(),
+        attachmentInfo.anchorUnit.get_orientation(),
+        consumedItem.itemScale
+    )
+    if deployedItemUnit == nil then
+        print(
+            TAG,
+            "deploy item create failed, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "layerIndex:",
+            layerIndex,
+            "itemIndex:",
+            consumedItem.itemIndex
+        )
+        return false
+    end
+
+    local physicsOk, physicsErr = pcall(function()
+        deployedItemUnit.set_physics_active(false)
+    end)
+    if not physicsOk then
+        print(
+            TAG,
+            "deploy item disable physics failed, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "layerIndex:",
+            layerIndex,
+            "itemIndex:",
+            consumedItem.itemIndex,
+            "err:",
+            physicsErr
+        )
+    end
+
+    attachmentInfo.deployedItemUnit = deployedItemUnit
+    attachmentInfo.deployedItemIndex = consumedItem.itemIndex
+    return true
+end
+
+---@param state table
+---@param rowIndex integer
+---@param role Role
+---@param roleCtrlUnit Character
+---@param rawNodeKey string
+---@param normalizedNodeKey string
+---@param matchedBy string
+---@param onFinished fun(errText: string|nil)
+local function autoDeployShelfRow(state, rowIndex, role, roleCtrlUnit, rawNodeKey, normalizedNodeKey, matchedBy, onFinished)
+    local startLayerIndex = getNextDeployLayerIndex(state, rowIndex)
+    if startLayerIndex == nil then
+        print(TAG, "invalid next layer index, shelfId:", state.shelfId, "rowIndex:", rowIndex)
+        GlobalAPI.show_tips("货架层索引异常", ERROR_TIPS_DURATION)
+        onFinished(nil)
+        return
+    end
+    if startLayerIndex > state.layoutPerRow then
+        GlobalAPI.show_tips("该层已上满", ERROR_TIPS_DURATION)
+        onFinished(nil)
+        return
+    end
+
+    local successCount = 0
+    local failedCount = 0
+    local finished = false
+    local deployTimer = Timer.new(DEPLOY_STEP_INTERVAL_SEC, true)
+    roleDeployTimers:set(roleCtrlUnit, deployTimer)
+
+    ---@param errText string|nil
+    local function finishDeploy(errText)
+        if finished then
+            return
+        end
+        finished = true
+        clearRoleDeployTimer(roleCtrlUnit)
+
+        if errText ~= nil then
+            onFinished(errText)
+            return
+        end
+
+        if successCount > 0 then
+            GlobalAPI.show_tips("自动上架完成，数量: " .. tostring(successCount), SUCCESS_TIPS_DURATION)
+        elseif failedCount > 0 then
+            GlobalAPI.show_tips("自动上架失败，已占位: " .. tostring(failedCount), ERROR_TIPS_DURATION)
+        end
+        onFinished(nil)
+    end
+
+    deployTimer:setTimeEndCb(function()
+        local ok, err = pcall(function()
+            if state.destroyed then
+                finishDeploy(nil)
+                return
+            end
+
+            local targetLayerIndex = getNextDeployLayerIndex(state, rowIndex)
+            if targetLayerIndex == nil then
+                print(TAG, "invalid loop layer index, shelfId:", state.shelfId, "rowIndex:", rowIndex)
+                finishDeploy(nil)
+                return
+            end
+            if targetLayerIndex > state.layoutPerRow then
+                finishDeploy(nil)
+                return
+            end
+
+            local consumedItem = consumeItemForDeploy(role)
+            if consumedItem == nil then
+                finishDeploy(nil)
+                return
+            end
+
+            local deployed = deployItemToTargetLayer(state, rowIndex, targetLayerIndex, consumedItem)
+            if deployed then
+                successCount = successCount + 1
+                print(
+                    TAG,
+                    "deploy success, shelfId:",
+                    state.shelfId,
+                    "rowIndex:",
+                    rowIndex,
+                    "layerIndex:",
+                    targetLayerIndex,
+                    "itemIndex:",
+                    consumedItem.itemIndex,
+                    "rawNodeId:",
+                    rawNodeKey,
+                    "normalizedNodeId:",
+                    normalizedNodeKey,
+                    "matchedBy:",
+                    matchedBy
+                )
+            else
+                failedCount = failedCount + 1
+            end
+        end)
+        if not ok then
+            local errText = tostring(err)
+            print(TAG, "auto deploy tick crashed, shelfId:", state.shelfId, "rowIndex:", rowIndex, "err:", errText)
+            finishDeploy(errText)
+        end
+    end)
+    deployTimer:start()
+end
+
+---@param state table
+---@param rowIndex integer
+---@param actor Actor|nil
+---@param data table|nil
+---@param rawNodeKey string
+---@param normalizedNodeKey string
+---@param matchedBy string
+local function handleShelfRowDeployTouch(state, rowIndex, actor, data, rawNodeKey, normalizedNodeKey, matchedBy)
+    if data == nil then
+        print(TAG, "deploy touch data nil, shelfId:", state.shelfId, "rowIndex:", rowIndex, "actor:", actor)
+        return
+    end
+    if state.destroyed then
+        return
+    end
+
+    local role = data.role
+    if role == nil then
+        print(TAG, "deploy touch missing role, shelfId:", state.shelfId, "rowIndex:", rowIndex, "actor:", actor)
+        GlobalAPI.show_tips("角色信息缺失，无法上架", ERROR_TIPS_DURATION)
+        return
+    end
+
+    local roleCtrlUnit = getRoleCtrlUnitForDeploy(role)
+    if roleCtrlUnit == nil then
+        print(TAG, "deploy touch missing role ctrl unit, shelfId:", state.shelfId, "rowIndex:", rowIndex, "actor:", actor)
+        GlobalAPI.show_tips("角色控制单位缺失，无法上架", ERROR_TIPS_DURATION)
+        return
+    end
+
+    if isRoleDeployBusy(roleCtrlUnit) then
+        GlobalAPI.show_tips("上架进行中，请稍后", ERROR_TIPS_DURATION)
+        return
+    end
+
+    clearRoleDeployTimer(roleCtrlUnit)
+    setRoleDeployBusyState(roleCtrlUnit, true)
+    local ok, err = pcall(function()
+        autoDeployShelfRow(
+            state,
+            rowIndex,
+            role,
+            roleCtrlUnit,
+            rawNodeKey,
+            normalizedNodeKey,
+            matchedBy,
+            function(deployErr)
+                setRoleDeployBusyState(roleCtrlUnit, false)
+                if deployErr ~= nil then
+                    GlobalAPI.show_tips("自动上架异常", ERROR_TIPS_DURATION)
+                end
+            end
+        )
+    end)
+
+    if not ok then
+        setRoleDeployBusyState(roleCtrlUnit, false)
+        print(TAG, "auto deploy crashed, shelfId:", state.shelfId, "rowIndex:", rowIndex, "err:", err)
+        GlobalAPI.show_tips("自动上架异常", ERROR_TIPS_DURATION)
+    end
+end
+
 ---@param state table
 ---@param sceneUiLayer E3DLayer
 ---@param rowIndex integer
@@ -496,10 +895,78 @@ local function registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
     )
 end
 
+---@param state table
+---@param sceneUiLayer E3DLayer
+---@param rowIndex integer
+---@param deployBtnNodeSuffix string
+---@return boolean
+local function registerShelfRowDeployTouchBySuffix(state, sceneUiLayer, rowIndex, deployBtnNodeSuffix)
+    local deployBtnNode = GameAPI.get_eui_node_at_scene_ui(sceneUiLayer, deployBtnNodeSuffix)
+    if deployBtnNode == nil then
+        print(
+            TAG,
+            "missing scene ui node by suffix, shelfId:",
+            state.shelfId,
+            "row:",
+            rowIndex,
+            "suffix:",
+            deployBtnNodeSuffix
+        )
+        return false
+    end
+
+    local triggerId = LuaAPI.global_register_trigger_event({ EVENT.EUI_NODE_TOUCH_EVENT, deployBtnNode, 1 }, function(_, actor, data)
+        local rawNodeKey = tostring(deployBtnNode)
+        if data ~= nil and data.eui_node_id ~= nil then
+            rawNodeKey = tostring(data.eui_node_id)
+        end
+        handleShelfRowDeployTouch(state, rowIndex, actor, data, rawNodeKey, rawNodeKey, "suffix")
+    end)
+    if type(triggerId) ~= "number" or triggerId ~= math.floor(triggerId) then
+        print(
+            TAG,
+            "register deploy touch by suffix failed, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "suffix:",
+            deployBtnNodeSuffix,
+            "nodeId:",
+            tostring(deployBtnNode),
+            "triggerId:",
+            triggerId
+        )
+        return false
+    end
+    state.deployTouchTriggerIdsByRow[rowIndex] = triggerId
+    print(
+        TAG,
+        "register deploy touch by suffix, shelfId:",
+        state.shelfId,
+        "rowIndex:",
+        rowIndex,
+        "suffix:",
+        deployBtnNodeSuffix,
+        "nodeId:",
+        tostring(deployBtnNode),
+        "triggerId:",
+        triggerId
+    )
+    return true
+end
+
 ---@param state table|nil
 local function destroyShelfRowButtons(state)
     if state == nil then
         return
+    end
+
+    for _, triggerId in pairs(state.deployTouchTriggerIdsByRow or {}) do
+        if type(triggerId) == "number" and triggerId == math.floor(triggerId) then
+            pcall(function()
+                LuaAPI.global_unregister_trigger_event(triggerId)
+            end)
+        end
     end
 
     for _, sceneUiLayer in pairs(state.sceneUiLayersByRow or {}) do
@@ -509,6 +976,7 @@ local function destroyShelfRowButtons(state)
             end)
         end
     end
+    state.deployTouchTriggerIdsByRow = {}
     state.sceneUiLayersByRow = {}
     state.deployBtnRowByNodeId = {}
     state.deployBtnWarnedUnknownNodeById = {}
@@ -522,6 +990,21 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
     destroyShelfRowButtons(state)
     state.deployBtnRowByNodeId = {}
     state.deployBtnWarnedUnknownNodeById = {}
+    state.deployTouchTriggerIdsByRow = {}
+
+    local deployBtnNodeId = UINodes.DeployBtn
+    local deployBtnNodeSuffix = nil
+    local suffixFallbackTriggered = false
+    -- 回退触发条件 1：配置显式关闭 suffix 触摸注册（DEPLOY_TOUCH_USE_SUFFIX=false）。
+    local useSuffixTouch = state.deployTouchUseSuffix == true
+    if useSuffixTouch then
+        deployBtnNodeSuffix = extractNodeIdSuffix(deployBtnNodeId)
+        if deployBtnNodeSuffix == nil then
+            -- 回退触发条件 2：DeployBtn 节点不满足 "前缀|后缀" 格式，无法解析后半截 token。
+            useSuffixTouch = false
+            print(TAG, "invalid DeployBtn node id for suffix mode, fallback to custom event, nodeId:", deployBtnNodeId)
+        end
+    end
 
     for rowIndex = 1, layout.rowCount do
         local rowButtonLocalOffset = buildRowButtonOffset(shelfConfig, rowIndex)
@@ -536,9 +1019,51 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
         )
         if sceneUiLayer ~= nil then
             state.sceneUiLayersByRow[rowIndex] = sceneUiLayer
-            registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
+            if useSuffixTouch and deployBtnNodeSuffix ~= nil then
+                local registerOk = registerShelfRowDeployTouchBySuffix(state, sceneUiLayer, rowIndex, deployBtnNodeSuffix)
+                if not registerOk then
+                    -- 回退触发条件 3：suffix 触摸注册任一层失败，当前货架整体验证失败，统一切回旧链路。
+                    useSuffixTouch = false
+                    suffixFallbackTriggered = true
+                end
+            end
+
+            if not useSuffixTouch then
+                if not suffixFallbackTriggered then
+                    registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
+                else
+                    -- 已触发整货架降级，旧映射将在循环结束后统一重建，避免重复注册。
+                end
+            else
+                -- 当前层已走 suffix 注册，跳过旧映射注册。
+            end
         else
             print(TAG, "create shelf row button scene ui failed, shelfId:", state.shelfId, "row:", rowIndex)
+        end
+    end
+
+    if useSuffixTouch then
+        -- suffix 模式生效：已通过 EUI_NODE_TOUCH_EVENT 完成逐层注册，不再注册 DeployBtnClicked 回退链路。
+        return
+    end
+
+    if suffixFallbackTriggered then
+        for _, triggerId in pairs(state.deployTouchTriggerIdsByRow or {}) do
+            if type(triggerId) == "number" and triggerId == math.floor(triggerId) then
+                pcall(function()
+                    LuaAPI.global_unregister_trigger_event(triggerId)
+                end)
+            end
+        end
+        state.deployTouchTriggerIdsByRow = {}
+        state.deployBtnRowByNodeId = {}
+        state.deployBtnWarnedUnknownNodeById = {}
+        -- 整货架回退：统一按旧映射链路重建所有已创建层，避免出现“部分 suffix + 部分旧模式”的混合状态。
+        for rowIndex = 1, layout.rowCount do
+            local sceneUiLayer = state.sceneUiLayersByRow[rowIndex]
+            if sceneUiLayer ~= nil then
+                registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
+            end
         end
     end
 
@@ -547,8 +1072,8 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
     end
     state.deployBtnCustomEventRegistered = true
 
-    -- DeployBtn 点击由 SceneUI 编辑器硬编码为 "DeployBtnClicked" 自定义事件，运行时通过 unit 事件分发，不走动态节点触摸注册（暂无法实现）
-    -- 事件回调里通过 nodeId 映射到行索引，兼容不同来源的 nodeId 形态（如引擎回调可能省略前缀）
+    -- 回退模式：沿用 SceneUI 编辑器硬编码的 "DeployBtnClicked" 自定义事件。
+    -- 事件回调里通过 nodeId 映射到行索引，兼容不同来源的 nodeId 形态（如引擎回调可能省略前缀）。
     LuaAPI.unit_register_custom_event(shelfUnit, "DeployBtnClicked", function(_, actor, data)
         if data == nil then
             print(TAG, "DeployBtnClicked data nil, shelfId:", state.shelfId, "actor:", actor)
@@ -591,19 +1116,7 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
             return
         end
 
-        print(
-            TAG,
-            "deploy button touched, shelfId:",
-            state.shelfId,
-            "rowIndex:",
-            rowIndex,
-            "rawNodeId:",
-            rawNodeKey,
-            "normalizedNodeId:",
-            normalizedNodeKey,
-            "matchedBy:",
-            matchedBy
-        )
+        handleShelfRowDeployTouch(state, rowIndex, actor, data, rawNodeKey, normalizedNodeKey, matchedBy)
     end)
 end
 
@@ -661,10 +1174,17 @@ end
 local function destroyAttachmentsInState(state)
     for _, rowLayers in pairs(state.layers or {}) do
         for _, attachmentInfo in pairs(rowLayers or {}) do
-            local attachmentUnit = attachmentInfo.unit
-            if attachmentUnit ~= nil then
+            local deployedItemUnit = attachmentInfo.deployedItemUnit
+            if deployedItemUnit ~= nil then
                 pcall(function()
-                    GameAPI.destroy_unit(attachmentUnit)
+                    GameAPI.destroy_unit(deployedItemUnit)
+                end)
+            end
+
+            local anchorUnit = attachmentInfo.anchorUnit
+            if anchorUnit ~= nil then
+                pcall(function()
+                    GameAPI.destroy_unit(anchorUnit)
                 end)
             end
         end
@@ -737,20 +1257,33 @@ end
 ---@param shelfUnit Unit
 ---@param shelfId string
 ---@param totalCount integer
+---@param rowCount integer
+---@param perRow integer
+---@param deployTouchUseSuffix boolean
 ---@return table
-local function createShelfAttachmentState(shelfUnit, shelfId, totalCount)
+local function createShelfAttachmentState(shelfUnit, shelfId, totalCount, rowCount, perRow, deployTouchUseSuffix)
     local oldState = shelfAttachmentStates:get(shelfUnit)
     if oldState ~= nil then
         clearShelfAttachmentState(shelfUnit, oldState, false)
     end
 
+    local nextDeployLayerByRow = {}
+    for rowIndex = 1, rowCount do
+        nextDeployLayerByRow[rowIndex] = 1
+    end
+
     local state = {
         shelfId = shelfId,
         totalCount = totalCount,
+        layoutRowCount = rowCount,
+        layoutPerRow = perRow,
         spawnedCount = 0,
         failedCount = 0,
         timer = nil,
         layers = {},
+        nextDeployLayerByRow = nextDeployLayerByRow,
+        deployTouchUseSuffix = deployTouchUseSuffix == true,
+        deployTouchTriggerIdsByRow = {},
         sceneUiLayersByRow = {},
         deployBtnRowByNodeId = {},
         deployBtnWarnedUnknownNodeById = {},
@@ -772,7 +1305,10 @@ local function recordAttachmentIndex(state, task, attachmentUnit)
     end
 
     rowLayers[task.layerIndex] = {
-        unit = attachmentUnit,
+        anchorUnit = attachmentUnit,
+        deployedItemUnit = nil,
+        deployedItemIndex = nil,
+        occupied = false,
         rowIndex = task.rowIndex,
         columnIndex = task.columnIndex,
         layerIndex = task.layerIndex,
@@ -851,14 +1387,22 @@ end
 ---@param shelfUnit Unit|nil
 ---@param shelfConfig table
 ---@param enableSlowSpawn boolean
-local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn)
+---@param deployTouchUseSuffix boolean
+local function spawnAttachmentsOnShelf(shelfUnit, shelfConfig, enableSlowSpawn, deployTouchUseSuffix)
     if shelfUnit == nil then
         return
     end
 
     local spawnTasks = buildAttachmentSpawnTasks(shelfConfig)
     local totalCount = #spawnTasks
-    local state = createShelfAttachmentState(shelfUnit, shelfConfig.shelfId, totalCount)
+    local state = createShelfAttachmentState(
+        shelfUnit,
+        shelfConfig.shelfId,
+        totalCount,
+        shelfConfig.layout.rowCount,
+        shelfConfig.layout.perRow,
+        deployTouchUseSuffix
+    )
     registerShelfDestroyEvents(shelfUnit, state)
     if totalCount == 0 then
         onShelfSpawnFinished(shelfUnit, shelfConfig, state)
@@ -940,6 +1484,12 @@ function TestAttachmentHelper.init()
         return
     end
 
+    local deployTouchUseSuffix = loadDeployTouchUseSuffix()
+    if deployTouchUseSuffix == nil then
+        GlobalAPI.show_tips("配置错误：DEPLOY_TOUCH_USE_SUFFIX", ERROR_TIPS_DURATION)
+        return
+    end
+
     local attachmentNode = UINodes.TestAttachmentCreate
     if attachmentNode == nil then
         print(TAG, "missing ui node: TestAttachmentCreate")
@@ -1009,7 +1559,7 @@ function TestAttachmentHelper.init()
         end
 
         enqueueShelfForDestroy(shelfUnit)
-        spawnAttachmentsOnShelf(shelfUnit, runtimeShelfConfig, enableSlowSpawn)
+        spawnAttachmentsOnShelf(shelfUnit, runtimeShelfConfig, enableSlowSpawn, deployTouchUseSuffix)
     end)
 
     local destroyNode = UINodes.TestShelfDestroy

@@ -4,6 +4,7 @@ local TAG = "[ShelfAttachmentConfig]"
 
 ShelfAttachmentConfig.CREATE_FORWARD_DISTANCE = 3.0 -- 生成到角色前方距离（Unit.get_position + Unit.get_local_direction，单位：米）
 ShelfAttachmentConfig.ENABLE_SLOW_SPAWN = true -- 是否启用慢速生成（TestShelfCreate 的 Attachment 生成节奏开关）
+ShelfAttachmentConfig.DEPLOY_TOUCH_USE_SUFFIX = true -- 是否使用 DeployBtn 后半截节点注册点击（true: EUI_NODE_TOUCH_EVENT，false: DeployBtnClicked 回退）
 
 local SHELF_IDS = {
     BASIC_SHELF = "BasicShelf",

@@ -11,15 +11,32 @@ local SCENE_UI_SOCKET = Enums.ModelSocket.socket_body -- SceneUI 绑定挂点（
 local inited = false
 local activeSceneUILayer = nil
 
+---@param nodeId ENode|string|nil
+---@return string|nil
+local function extractNodeIdSuffix(nodeId)
+    if type(nodeId) ~= "string" or nodeId == "" then
+        return nil
+    end
+
+    local separatorIndex = string.find(nodeId, "|", 1, true)
+    if separatorIndex == nil or separatorIndex >= #nodeId then
+        return nil
+    end
+
+    return string.sub(nodeId, separatorIndex + 1)
+end
+
 ---@param sceneUiLayer E3DLayer
 local function registerDeployButtonTouch(sceneUiLayer)
     local deployBtnNodeId = UINodes.DeployBtn
-    if deployBtnNodeId == nil then
-        print(TAG, "missing ui node: DeployBtn")
+    local deployBtnNodeSuffix = extractNodeIdSuffix(deployBtnNodeId)
+    if deployBtnNodeSuffix == nil then
+        print(TAG, "invalid ui node: DeployBtn", deployBtnNodeId)
         return
     end
 
-    local deployBtnNode = GameAPI.get_eui_node_at_scene_ui(sceneUiLayer, deployBtnNodeId)
+    local deployBtnNode = GameAPI.get_eui_node_at_scene_ui(sceneUiLayer, deployBtnNodeSuffix)
+    print(TAG, "deployBtnNode:", deployBtnNode)
     if deployBtnNode == nil then
         print(TAG, "missing scene ui node: DeployBtn")
         return

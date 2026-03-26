@@ -9,8 +9,14 @@ local ITEM_ID = {
 }
 
 local DEFAULT_ITEM_SCALE = math.Vector3(1.0, 1.0, 1.0) -- 物品默认缩放（DisplayComp.bind_model/create_unit_with_scale _scale）
+local defaultItemIdQueueCursor = 0 -- 缺省 item 队列游标（启用队列轮换时使用，1-based）
 
 ItemConfig.DEFAULT_ITEM_ID = ITEM_ID.TEST_MILK_SHAKE -- 默认 item 标识（通用默认选择）
+ItemConfig.ENABLE_DEFAULT_ITEM_QUEUE = true -- 是否启用缺省 item 队列轮换（true: 按队列循环，false: 固定 DEFAULT_ITEM_ID）
+ItemConfig.DEFAULT_ITEM_ID_QUEUE = { -- 缺省 item 队列（启用轮换时按顺序循环）
+    ITEM_ID.TEST_MILK_SHAKE,
+    ITEM_ID.TEST_BOMB,
+}
 
 local ITEM_DEFI = {
     [ITEM_ID.TEST_MILK_SHAKE] = {
@@ -35,6 +41,34 @@ local ITEM_DEFI = {
 
 ItemConfig.ITEM_ID = ITEM_ID
 ItemConfig.ITEM_DEFINITIONS = ITEM_DEFI
+
+---@return string|nil
+function ItemConfig.getDefaultItemId()
+    if ItemConfig.ENABLE_DEFAULT_ITEM_QUEUE ~= true then
+        return ItemConfig.DEFAULT_ITEM_ID
+    end
+
+    local defaultItemQueue = ItemConfig.DEFAULT_ITEM_ID_QUEUE
+    if type(defaultItemQueue) ~= "table" or #defaultItemQueue == 0 then
+        print(TAG, "invalid default item queue, fallback to DEFAULT_ITEM_ID")
+        return ItemConfig.DEFAULT_ITEM_ID
+    end
+
+    local queueCount = #defaultItemQueue
+    defaultItemIdQueueCursor = defaultItemIdQueueCursor % queueCount + 1
+    local queueItemId = defaultItemQueue[defaultItemIdQueueCursor]
+    if type(queueItemId) ~= "string" or queueItemId == "" then
+        print(TAG, "invalid default queue item id, index:", defaultItemIdQueueCursor, "value:", queueItemId)
+        return ItemConfig.DEFAULT_ITEM_ID
+    end
+
+    if ItemConfig.ITEM_DEFINITIONS[queueItemId] == nil then
+        print(TAG, "default queue item definition not found, itemId:", queueItemId)
+        return ItemConfig.DEFAULT_ITEM_ID
+    end
+
+    return queueItemId
+end
 
 ---@param itemId string|nil
 ---@return table|nil

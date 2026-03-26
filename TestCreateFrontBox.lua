@@ -18,10 +18,9 @@ local BOX_LAYER_BASE_OFFSET = math.Vector3(0.0, 1.0, 0.0) -- 第 0 层箱子相�
 
 local groundBoxStates = dict()
 local roleFollowStates = dict()
-local cachedItemAttConfigs = nil
-local itemAttConfigLoadFailed = false
 
 ---@alias Node string
+---@alias BoxConsumeErrCode "missing_role"|"missing_ctrl_unit"|"no_follow_box"|"follow_box_empty"
 
 local function debugLog(...)
     if not DEBUG_LOG_ENABLED then
@@ -92,19 +91,121 @@ end
 
 ---@return table[]|nil
 local function getItemAttConfigs()
-    if cachedItemAttConfigs ~= nil then
-        return cachedItemAttConfigs
+    return buildRuntimeItemAttConfigs()
+end
+
+---@param slot table
+---@return table
+local function cloneBoxItemSlot(slot)
+    return {
+        index = slot.index,
+        itemId = slot.itemId,
+        itemUnitKey = slot.itemUnitKey,
+        itemScale = slot.itemScale,
+        localOffset = slot.localOffset,
+        consumed = slot.consumed == true,
+    }
+end
+
+---@param boxInventory table
+---@return integer
+local function findBoxTailCursor(boxInventory)
+    if boxInventory == nil or boxInventory.itemSlots == nil then
+        return 0
     end
-    if itemAttConfigLoadFailed then
+
+    for slotIndex = #boxInventory.itemSlots, 1, -1 do
+        local slot = boxInventory.itemSlots[slotIndex]
+        if slot ~= nil and slot.consumed ~= true then
+            return slotIndex
+        end
+    end
+    return 0
+end
+
+---@return table|nil
+local function createDefaultBoxInventory()
+    local itemConfigs = getItemAttConfigs()
+    if itemConfigs == nil then
+        print(TAG, "missing item att configs for default box inventory")
         return nil
     end
 
-    cachedItemAttConfigs = buildRuntimeItemAttConfigs()
-    if cachedItemAttConfigs == nil then
-        itemAttConfigLoadFailed = true
+    local itemSlots = {}
+    for _, itemConfig in ipairs(itemConfigs) do
+        itemSlots[#itemSlots + 1] = {
+            index = itemConfig.index,
+            itemId = itemConfig.itemId,
+            itemUnitKey = itemConfig.itemUnitKey,
+            itemScale = itemConfig.itemScale,
+            localOffset = itemConfig.localOffset,
+            consumed = false,
+        }
+    end
+
+    return {
+        itemSlots = itemSlots,
+        tailConsumeCursor = #itemSlots,
+    }
+end
+
+---@param sourceInventory table|nil
+---@return table|nil
+local function cloneBoxInventory(sourceInventory)
+    if sourceInventory == nil then
+        return createDefaultBoxInventory()
+    end
+
+    local sourceSlots = sourceInventory.itemSlots
+    if type(sourceSlots) ~= "table" then
+        print(TAG, "invalid box inventory slots, type:", type(sourceSlots))
         return nil
     end
-    return cachedItemAttConfigs
+
+    local itemSlots = {}
+    for _, sourceSlot in ipairs(sourceSlots) do
+        itemSlots[#itemSlots + 1] = cloneBoxItemSlot(sourceSlot)
+    end
+
+    local tailConsumeCursor = findBoxTailCursor({ itemSlots = itemSlots })
+    return {
+        itemSlots = itemSlots,
+        tailConsumeCursor = tailConsumeCursor,
+    }
+end
+
+---@param boxInventory table
+---@return boolean
+local function isBoxInventoryEmpty(boxInventory)
+    return findBoxTailCursor(boxInventory) <= 0
+end
+
+---@param boxInventory table
+---@return integer|nil
+local function consumeItemSlotFromTail(boxInventory)
+    if boxInventory == nil or type(boxInventory.itemSlots) ~= "table" then
+        return nil
+    end
+
+    local startIndex = boxInventory.tailConsumeCursor
+    if type(startIndex) ~= "number" or startIndex < 1 then
+        startIndex = #boxInventory.itemSlots
+    end
+    if startIndex ~= math.floor(startIndex) then
+        startIndex = math.floor(startIndex)
+    end
+
+    for slotIndex = startIndex, 1, -1 do
+        local slot = boxInventory.itemSlots[slotIndex]
+        if slot ~= nil and slot.consumed ~= true then
+            slot.consumed = true
+            boxInventory.tailConsumeCursor = slotIndex - 1
+            return slotIndex
+        end
+    end
+
+    boxInventory.tailConsumeCursor = 0
+    return nil
 end
 
 ---@param targetUnits Unit[]|nil
@@ -234,11 +335,11 @@ end
 
 ---@param roleCtrlUnit Character
 ---@param stackIndex integer
+---@param boxInventory table|nil
 ---@return table|nil
-local function createFollowLayer(roleCtrlUnit, stackIndex)
-    local itemConfigs = getItemAttConfigs()
-    if itemConfigs == nil then
-        print(TAG, "missing item att configs for follow layer")
+local function createFollowLayer(roleCtrlUnit, stackIndex, boxInventory)
+    if boxInventory == nil or type(boxInventory.itemSlots) ~= "table" then
+        print(TAG, "invalid box inventory for follow layer")
         return nil
     end
 
@@ -250,28 +351,34 @@ local function createFollowLayer(roleCtrlUnit, stackIndex)
     end
 
     local itemBindIds = {}
-    for itemIndex, itemConfig in ipairs(itemConfigs) do
-        local runtimeItemIndex = itemConfig.index or itemIndex
-        local itemOffset = boxOffset + itemConfig.localOffset
-        local itemBindId = roleCtrlUnit.bind_model(
-            itemConfig.itemUnitKey,
-            FOLLOW_SOCKET,
-            itemOffset,
-            DEFAULT_QUATERNION,
-            itemConfig.itemScale
-        )
-        if itemBindId == nil then
-            unbindModels(roleCtrlUnit, { boxBindId })
-            unbindModels(roleCtrlUnit, itemBindIds)
-            print(TAG, "bind item failed at layer:", stackIndex, "index:", runtimeItemIndex)
-            return nil
+    local itemBindIdByIndex = {}
+    for _, itemSlot in ipairs(boxInventory.itemSlots) do
+        if itemSlot.consumed ~= true then
+            local runtimeItemIndex = itemSlot.index
+            local itemOffset = boxOffset + itemSlot.localOffset
+            local itemBindId = roleCtrlUnit.bind_model(
+                itemSlot.itemUnitKey,
+                FOLLOW_SOCKET,
+                itemOffset,
+                DEFAULT_QUATERNION,
+                itemSlot.itemScale
+            )
+            if itemBindId == nil then
+                unbindModels(roleCtrlUnit, { boxBindId })
+                unbindModels(roleCtrlUnit, itemBindIds)
+                print(TAG, "bind item failed at layer:", stackIndex, "index:", runtimeItemIndex)
+                return nil
+            end
+            itemBindIds[#itemBindIds + 1] = itemBindId
+            itemBindIdByIndex[runtimeItemIndex] = itemBindId
         end
-        itemBindIds[#itemBindIds + 1] = itemBindId
     end
 
     return {
         boxBindId = boxBindId,
         itemBindIds = itemBindIds,
+        itemBindIdByIndex = itemBindIdByIndex,
+        inventory = boxInventory,
         stackIndex = stackIndex,
     }
 end
@@ -289,30 +396,41 @@ local function destroyFollowLayer(roleCtrlUnit, followLayer)
 end
 
 ---@param boxUnit Unit
+---@param boxInventory table|nil
 ---@return Unit[]|nil, JointAssistant[]|nil
-local function createGroundItems(boxUnit)
-    local itemConfigs = getItemAttConfigs()
-    if itemConfigs == nil then
-        print(TAG, "missing item att configs for ground items")
+local function createGroundItems(boxUnit, boxInventory)
+    if boxInventory == nil or type(boxInventory.itemSlots) ~= "table" then
+        print(TAG, "invalid box inventory for ground items")
         return nil
     end
 
     local itemOrientation = boxUnit.get_orientation()
     local itemUnits = {}
 
-    for _, itemConfig in ipairs(itemConfigs) do
-        local itemPosition = boxUnit.get_local_offset_position(itemConfig.localOffset)
-        local itemUnit = GameAPI.create_unit_with_scale(
-            itemConfig.itemUnitKey,
-            itemPosition,
-            itemOrientation,
-            itemConfig.itemScale
-        )
-        if itemUnit == nil then
-            destroyUnits(itemUnits)
-            return nil
+    for _, itemSlot in ipairs(boxInventory.itemSlots) do
+        if itemSlot.consumed ~= true then
+            local itemPosition = boxUnit.get_local_offset_position(itemSlot.localOffset)
+            local itemUnit = GameAPI.create_unit_with_scale(
+                itemSlot.itemUnitKey,
+                itemPosition,
+                itemOrientation,
+                itemSlot.itemScale
+            )
+            if itemUnit == nil then
+                destroyUnits(itemUnits)
+                return nil
+            end
+
+            -- 禁用重力无效，暂时在编辑器固定设置item的重量为1
+            -- local gravityOk, gravityErr = pcall(function()
+            --     itemUnit.disable_gravity()
+            -- end)
+            -- if not gravityOk then
+            --     print(TAG, "disable gravity failed, itemId:", itemSlot.itemId, "index:", itemSlot.index, "err:", gravityErr)
+            -- end
+
+            itemUnits[#itemUnits + 1] = itemUnit
         end
-        itemUnits[#itemUnits + 1] = itemUnit
     end
 
     local jointUnits = {}
@@ -330,8 +448,15 @@ local function createGroundItems(boxUnit)
 end
 
 ---@param roleCtrlUnit Character
+---@param sourceInventory table|nil
 ---@return table|nil
-local function createGroundBoxState(roleCtrlUnit)
+local function createGroundBoxState(roleCtrlUnit, sourceInventory)
+    local boxInventory = cloneBoxInventory(sourceInventory)
+    if boxInventory == nil then
+        print(TAG, "create box inventory failed")
+        return nil
+    end
+
     local boxUnit = GameAPI.create_unit_with_scale(
         TEST_BOX_ID,
         getGroundBoxPosition(roleCtrlUnit),
@@ -343,7 +468,7 @@ local function createGroundBoxState(roleCtrlUnit)
         return nil
     end
 
-    local itemUnits, jointUnits = createGroundItems(boxUnit)
+    local itemUnits, jointUnits = createGroundItems(boxUnit, boxInventory)
     if itemUnits == nil or jointUnits == nil then
         print(TAG, "create ground items failed")
         GameAPI.destroy_unit(boxUnit)
@@ -354,6 +479,7 @@ local function createGroundBoxState(roleCtrlUnit)
         boxUnit = boxUnit,
         itemUnits = itemUnits,
         jointUnits = jointUnits,
+        inventory = boxInventory,
     }
     groundBoxStates:set(boxUnit, groundBoxState)
     debugLog("create ground box success, boxUnit:", boxUnit, "itemCount:", #itemUnits)
@@ -391,7 +517,7 @@ local function reindexFollowLayers(roleCtrlUnit, followState)
     for boxIndex, followLayer in ipairs(followState.boxes) do
         local targetStackIndex = boxIndex - 1
         if followLayer.stackIndex ~= targetStackIndex then
-            local newFollowLayer = createFollowLayer(roleCtrlUnit, targetStackIndex)
+            local newFollowLayer = createFollowLayer(roleCtrlUnit, targetStackIndex, followLayer.inventory)
             if newFollowLayer ~= nil then
                 destroyFollowLayer(roleCtrlUnit, followLayer)
                 followState.boxes[boxIndex] = newFollowLayer
@@ -415,8 +541,14 @@ local function pickupGroundBox(roleCtrlUnit, boxUnit)
         return
     end
 
+    local followInventory = cloneBoxInventory(groundBoxState.inventory)
+    if followInventory == nil then
+        print(TAG, "clone ground inventory failed, boxUnit:", boxUnit)
+        return
+    end
+
     local followState = getOrCreateFollowState(roleCtrlUnit)
-    local followLayer = createFollowLayer(roleCtrlUnit, #followState.boxes)
+    local followLayer = createFollowLayer(roleCtrlUnit, #followState.boxes, followInventory)
     if followLayer == nil then
         clearFollowStateIfEmpty(roleCtrlUnit)
         return
@@ -427,9 +559,10 @@ local function pickupGroundBox(roleCtrlUnit, boxUnit)
 end
 
 ---@param roleCtrlUnit Character
+---@param sourceInventory table|nil
 ---@return Unit|nil
-local function spawnGroundBox(roleCtrlUnit)
-    local groundBoxState = createGroundBoxState(roleCtrlUnit)
+local function spawnGroundBox(roleCtrlUnit, sourceInventory)
+    local groundBoxState = createGroundBoxState(roleCtrlUnit, sourceInventory)
     if groundBoxState == nil then
         return nil
     end
@@ -444,7 +577,7 @@ local function createBoxInFront(role)
         return nil
     end
 
-    return spawnGroundBox(roleCtrlUnit)
+    return spawnGroundBox(roleCtrlUnit, nil)
 end
 
 ---@param boxUnit Unit
@@ -477,6 +610,102 @@ local function registerGroundBoxEvents(boxUnit)
     end)
 end
 
+---@param roleCtrlUnit Character
+---@param followLayer table|nil
+---@param itemIndex integer
+local function unbindFollowLayerItem(roleCtrlUnit, followLayer, itemIndex)
+    if followLayer == nil or followLayer.itemBindIdByIndex == nil then
+        return
+    end
+
+    local bindId = followLayer.itemBindIdByIndex[itemIndex]
+    if bindId == nil then
+        return
+    end
+
+    followLayer.itemBindIdByIndex[itemIndex] = nil
+    pcall(function()
+        roleCtrlUnit.unbind_model(bindId)
+    end)
+end
+
+---@param roleCtrlUnit Character
+---@param followLayer table|nil
+---@return table|nil
+local function consumeFollowLayerTailItem(roleCtrlUnit, followLayer)
+    if followLayer == nil or followLayer.inventory == nil then
+        return nil
+    end
+
+    local slotIndex = consumeItemSlotFromTail(followLayer.inventory)
+    if slotIndex == nil then
+        return nil
+    end
+
+    local itemSlot = followLayer.inventory.itemSlots[slotIndex]
+    if itemSlot == nil then
+        return nil
+    end
+
+    unbindFollowLayerItem(roleCtrlUnit, followLayer, itemSlot.index)
+    return {
+        itemIndex = itemSlot.index,
+        itemId = itemSlot.itemId,
+        itemUnitKey = itemSlot.itemUnitKey,
+        itemScale = itemSlot.itemScale,
+        localOffset = itemSlot.localOffset,
+    }
+end
+
+---@param role Role|nil
+---@return table|nil consumedItem
+---@return BoxConsumeErrCode|nil errCode
+function TestCreateFrontBox.consumeFollowBoxItemByRole(role)
+    if role == nil then
+        print(TAG, "consume follow box failed, missing role")
+        return nil, "missing_role"
+    end
+
+    local roleCtrlUnit = role.get_ctrl_unit()
+    if roleCtrlUnit == nil then
+        print(TAG, "consume follow box failed, missing ctrl unit")
+        return nil, "missing_ctrl_unit"
+    end
+
+    local followState = roleFollowStates:get(roleCtrlUnit)
+    if followState == nil or #followState.boxes == 0 then
+        return nil, "no_follow_box"
+    end
+
+    for boxIndex = #followState.boxes, 1, -1 do
+        local followLayer = followState.boxes[boxIndex]
+        if followLayer == nil then
+            table.remove(followState.boxes, boxIndex)
+            reindexFollowLayers(roleCtrlUnit, followState)
+        else
+            local consumedItem = consumeFollowLayerTailItem(roleCtrlUnit, followLayer)
+            if consumedItem ~= nil then
+                if isBoxInventoryEmpty(followLayer.inventory) then
+                    table.remove(followState.boxes, boxIndex)
+                    destroyFollowLayer(roleCtrlUnit, followLayer)
+                    reindexFollowLayers(roleCtrlUnit, followState)
+                    clearFollowStateIfEmpty(roleCtrlUnit)
+                end
+                return consumedItem, nil
+            end
+
+            if isBoxInventoryEmpty(followLayer.inventory) then
+                table.remove(followState.boxes, boxIndex)
+                destroyFollowLayer(roleCtrlUnit, followLayer)
+                reindexFollowLayers(roleCtrlUnit, followState)
+            end
+        end
+    end
+
+    clearFollowStateIfEmpty(roleCtrlUnit)
+    return nil, "follow_box_empty"
+end
+
 ---@param role Role|nil
 local function releaseLiftBox(role)
     local roleCtrlUnit = getRoleCtrlUnit(role)
@@ -489,15 +718,15 @@ local function releaseLiftBox(role)
         return
     end
 
-    local releasedFollowLayer = followState.boxes[1]
+    local releasedFollowLayer = followState.boxes[#followState.boxes]
 
-    local releaseBoxUnit = spawnGroundBox(roleCtrlUnit)
+    local releaseBoxUnit = spawnGroundBox(roleCtrlUnit, releasedFollowLayer.inventory)
     if releaseBoxUnit == nil then
         print(TAG, "create release box failed")
         return
     end
 
-    table.remove(followState.boxes, 1)
+    table.remove(followState.boxes, #followState.boxes)
     destroyFollowLayer(roleCtrlUnit, releasedFollowLayer)
     registerGroundBoxEvents(releaseBoxUnit)
     reindexFollowLayers(roleCtrlUnit, followState)

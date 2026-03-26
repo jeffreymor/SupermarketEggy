@@ -77,7 +77,8 @@ end
 ---@param value any
 ---@return Vector3|nil
 local function parseVector3(itemId, fieldPath, value)
-    if type(value) ~= "table" then
+    local valueType = type(value)
+    if valueType ~= "table" and valueType ~= "Vector3" then
         logItemAttFieldError(itemId, fieldPath, value)
         return nil
     end
@@ -161,7 +162,7 @@ end
 function ItemAttConfig.getItemAttDefByItemId(itemId)
     local targetItemId = itemId
     if targetItemId == nil then
-        targetItemId = ItemConfig.DEFAULT_ITEM_ID
+        targetItemId = ItemConfig.getDefaultItemId()
     end
 
     if type(targetItemId) ~= "string" or targetItemId == "" then
