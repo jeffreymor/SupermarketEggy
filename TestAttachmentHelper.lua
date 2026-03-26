@@ -535,6 +535,7 @@ local function markShelfRowLayerOccupied(state, rowIndex, layerIndex)
             columnIndex = layerIndex,
             anchorUnit = nil,
             deployedItemUnit = nil,
+            deployedItemId = nil,
             occupied = false,
         }
         rowLayers[layerIndex] = attachmentInfo
@@ -599,21 +600,25 @@ local function clearRoleDeployTimer(roleCtrlUnit)
 end
 
 ---@param role Role|nil
+---@param expectedItemId string|nil
 ---@return table|nil
-local function consumeItemForDeploy(role)
-    local consumedItem, errCode = TestCreateFrontBox.consumeFollowBoxItemByRole(role)
+---@return string|nil
+local function consumeItemForDeploy(role, expectedItemId)
+    local consumedItem, errCode = TestCreateFrontBox.consumeFollowBoxItemByRole(role, expectedItemId)
     if consumedItem ~= nil then
-        return consumedItem
+        return consumedItem, nil
     end
 
     if errCode == "missing_role" or errCode == "missing_ctrl_unit" then
         GlobalAPI.show_tips("角色信息缺失，无法上架", ERROR_TIPS_DURATION)
+    elseif errCode == "item_type_mismatch" then
+        GlobalAPI.show_tips("该层已固定一种物品，不能混合上架", ERROR_TIPS_DURATION)
     elseif errCode == "no_follow_box" or errCode == "follow_box_empty" then
         GlobalAPI.show_tips("无可用箱子货物", ERROR_TIPS_DURATION)
     else
         GlobalAPI.show_tips("箱子货物扣减失败", ERROR_TIPS_DURATION)
     end
-    return nil
+    return nil, errCode
 end
 
 ---@param state table
@@ -685,7 +690,11 @@ local function deployItemToTargetLayer(state, rowIndex, layerIndex, consumedItem
     end
 
     attachmentInfo.deployedItemUnit = deployedItemUnit
+    attachmentInfo.deployedItemId = consumedItem.itemId
     attachmentInfo.deployedItemIndex = consumedItem.itemIndex
+    if state.fixedItemIdByRow[rowIndex] == nil then
+        state.fixedItemIdByRow[rowIndex] = consumedItem.itemId
+    end
     return true
 end
 
@@ -756,8 +765,15 @@ local function autoDeployShelfRow(state, rowIndex, role, roleCtrlUnit, rawNodeKe
                 return
             end
 
-            local consumedItem = consumeItemForDeploy(role)
+            local expectedItemId = state.fixedItemIdByRow[rowIndex]
+            local consumedItem = nil
+            local consumeErrCode = nil
+            consumedItem, consumeErrCode = consumeItemForDeploy(role, expectedItemId)
             if consumedItem == nil then
+                if consumeErrCode == "item_type_mismatch" then
+                    finishDeploy(nil)
+                    return
+                end
                 finishDeploy(nil)
                 return
             end
@@ -1282,6 +1298,7 @@ local function createShelfAttachmentState(shelfUnit, shelfId, totalCount, rowCou
         timer = nil,
         layers = {},
         nextDeployLayerByRow = nextDeployLayerByRow,
+        fixedItemIdByRow = {},
         deployTouchUseSuffix = deployTouchUseSuffix == true,
         deployTouchTriggerIdsByRow = {},
         sceneUiLayersByRow = {},
@@ -1307,6 +1324,7 @@ local function recordAttachmentIndex(state, task, attachmentUnit)
     rowLayers[task.layerIndex] = {
         anchorUnit = attachmentUnit,
         deployedItemUnit = nil,
+        deployedItemId = nil,
         deployedItemIndex = nil,
         occupied = false,
         rowIndex = task.rowIndex,

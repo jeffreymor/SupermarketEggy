@@ -20,7 +20,7 @@ local groundBoxStates = dict()
 local roleFollowStates = dict()
 
 ---@alias Node string
----@alias BoxConsumeErrCode "missing_role"|"missing_ctrl_unit"|"no_follow_box"|"follow_box_empty"
+---@alias BoxConsumeErrCode "missing_role"|"missing_ctrl_unit"|"no_follow_box"|"follow_box_empty"|"item_type_mismatch"
 
 local function debugLog(...)
     if not DEBUG_LOG_ENABLED then
@@ -206,6 +206,32 @@ local function consumeItemSlotFromTail(boxInventory)
 
     boxInventory.tailConsumeCursor = 0
     return nil
+end
+
+---@param boxInventory table
+---@return integer|nil
+---@return table|nil
+local function peekItemSlotFromTail(boxInventory)
+    if boxInventory == nil or type(boxInventory.itemSlots) ~= "table" then
+        return nil, nil
+    end
+
+    local startIndex = boxInventory.tailConsumeCursor
+    if type(startIndex) ~= "number" or startIndex < 1 then
+        startIndex = #boxInventory.itemSlots
+    end
+    if startIndex ~= math.floor(startIndex) then
+        startIndex = math.floor(startIndex)
+    end
+
+    for slotIndex = startIndex, 1, -1 do
+        local slot = boxInventory.itemSlots[slotIndex]
+        if slot ~= nil and slot.consumed ~= true then
+            return slotIndex, slot
+        end
+    end
+
+    return nil, nil
 end
 
 ---@param targetUnits Unit[]|nil
@@ -658,9 +684,10 @@ local function consumeFollowLayerTailItem(roleCtrlUnit, followLayer)
 end
 
 ---@param role Role|nil
+---@param expectedItemId string|nil
 ---@return table|nil consumedItem
 ---@return BoxConsumeErrCode|nil errCode
-function TestCreateFrontBox.consumeFollowBoxItemByRole(role)
+function TestCreateFrontBox.consumeFollowBoxItemByRole(role, expectedItemId)
     if role == nil then
         print(TAG, "consume follow box failed, missing role")
         return nil, "missing_role"
@@ -677,12 +704,22 @@ function TestCreateFrontBox.consumeFollowBoxItemByRole(role)
         return nil, "no_follow_box"
     end
 
+    local expectedItemIdValue = nil
+    if type(expectedItemId) == "string" and expectedItemId ~= "" then
+        expectedItemIdValue = expectedItemId
+    end
+
     for boxIndex = #followState.boxes, 1, -1 do
         local followLayer = followState.boxes[boxIndex]
         if followLayer == nil then
             table.remove(followState.boxes, boxIndex)
             reindexFollowLayers(roleCtrlUnit, followState)
         else
+            local _, peekItemSlot = peekItemSlotFromTail(followLayer.inventory)
+            if peekItemSlot ~= nil and expectedItemIdValue ~= nil and peekItemSlot.itemId ~= expectedItemIdValue then
+                return nil, "item_type_mismatch"
+            end
+
             local consumedItem = consumeFollowLayerTailItem(roleCtrlUnit, followLayer)
             if consumedItem ~= nil then
                 if isBoxInventoryEmpty(followLayer.inventory) then
