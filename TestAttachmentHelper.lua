@@ -26,9 +26,37 @@ local AXIS_ENUM = {
 
 local shelfAttachmentStates = dict()
 local shelfDestroyQueue = {}
+local activeShelfUnits = {}
 local roleDeployBusyStates = dict()
 local roleDeployTimers = dict()
 local inited = false
+
+---@param shelfUnit Unit|nil
+local function addActiveShelfUnit(shelfUnit)
+    if shelfUnit == nil then
+        return
+    end
+
+    for index = 1, #activeShelfUnits do
+        if activeShelfUnits[index] == shelfUnit then
+            return
+        end
+    end
+    activeShelfUnits[#activeShelfUnits + 1] = shelfUnit
+end
+
+---@param shelfUnit Unit|nil
+local function removeActiveShelfUnit(shelfUnit)
+    if shelfUnit == nil then
+        return
+    end
+
+    for index = #activeShelfUnits, 1, -1 do
+        if activeShelfUnits[index] == shelfUnit then
+            table.remove(activeShelfUnits, index)
+        end
+    end
+end
 
 local function debugLog(...)
     if not DEBUG_LOG_ENABLED then
@@ -500,19 +528,43 @@ end
 ---@param rowIndex integer
 ---@return integer|nil
 local function getNextDeployLayerIndex(state, rowIndex)
-    local nextDeployLayerByRow = state.nextDeployLayerByRow
-    if nextDeployLayerByRow == nil then
+    if state == nil then
         return nil
     end
 
-    local nextLayerIndex = nextDeployLayerByRow[rowIndex]
-    if type(nextLayerIndex) ~= "number" or nextLayerIndex ~= math.floor(nextLayerIndex) then
+    local perRow = state.layoutPerRow
+    if type(perRow) ~= "number" or perRow ~= math.floor(perRow) or perRow < 1 then
         return nil
     end
-    if nextLayerIndex < 1 then
+    local perRowInteger = math.tointeger(perRow)
+    if perRowInteger == nil then
         return nil
     end
-    return math.tointeger(nextLayerIndex)
+
+    local rowLayers = state.layers[rowIndex]
+    if type(rowLayers) ~= "table" then
+        local fullLayerIndex = perRowInteger + 1
+        if state.nextDeployLayerByRow ~= nil then
+            state.nextDeployLayerByRow[rowIndex] = fullLayerIndex
+        end
+        return fullLayerIndex
+    end
+
+    for layerIndex = 1, perRowInteger do
+        local attachmentInfo = rowLayers[layerIndex]
+        if attachmentInfo ~= nil and attachmentInfo.attachmentUnit ~= nil and attachmentInfo.deployedItemUnit == nil then
+            if state.nextDeployLayerByRow ~= nil then
+                state.nextDeployLayerByRow[rowIndex] = layerIndex
+            end
+            return layerIndex
+        end
+    end
+
+    local fullLayerIndex = perRowInteger + 1
+    if state.nextDeployLayerByRow ~= nil then
+        state.nextDeployLayerByRow[rowIndex] = fullLayerIndex
+    end
+    return fullLayerIndex
 end
 
 ---@param state table
@@ -533,7 +585,7 @@ local function markShelfRowLayerOccupied(state, rowIndex, layerIndex)
             rowIndex = rowIndex,
             layerIndex = layerIndex,
             columnIndex = layerIndex,
-            anchorUnit = nil,
+            attachmentUnit = nil,
             deployedItemUnit = nil,
             deployedItemId = nil,
             occupied = false,
@@ -577,6 +629,14 @@ local function isRoleDeployBusy(roleCtrlUnit)
 
     if roleDeployBusyStates:get(roleCtrlUnit) == true then
         return true
+    end
+
+    local kvExists = false
+    local kvExistsOk = pcall(function()
+        kvExists = roleCtrlUnit.has_kv(DEPLOY_BUSY_KV_KEY) == true
+    end)
+    if not kvExistsOk or not kvExists then
+        return false
     end
 
     local kvBusy = false
@@ -634,10 +694,10 @@ local function deployItemToTargetLayer(state, rowIndex, layerIndex, consumedItem
         attachmentInfo = rowLayers[layerIndex]
     end
 
-    if attachmentInfo == nil or attachmentInfo.anchorUnit == nil then
+    if attachmentInfo == nil or attachmentInfo.attachmentUnit == nil then
         print(
             TAG,
-            "missing deploy anchor, shelfId:",
+            "missing deploy attachment, shelfId:",
             state.shelfId,
             "rowIndex:",
             rowIndex,
@@ -651,8 +711,8 @@ local function deployItemToTargetLayer(state, rowIndex, layerIndex, consumedItem
 
     local deployedItemUnit = GameAPI.create_unit_with_scale(
         consumedItem.itemUnitKey,
-        attachmentInfo.anchorUnit.get_position(),
-        attachmentInfo.anchorUnit.get_orientation(),
+        attachmentInfo.attachmentUnit.get_position(),
+        attachmentInfo.attachmentUnit.get_orientation(),
         consumedItem.itemScale
     )
     if deployedItemUnit == nil then
@@ -1197,10 +1257,10 @@ local function destroyAttachmentsInState(state)
                 end)
             end
 
-            local anchorUnit = attachmentInfo.anchorUnit
-            if anchorUnit ~= nil then
+            local attachmentUnit = attachmentInfo.attachmentUnit
+            if attachmentUnit ~= nil then
                 pcall(function()
-                    GameAPI.destroy_unit(anchorUnit)
+                    GameAPI.destroy_unit(attachmentUnit)
                 end)
             end
         end
@@ -1216,6 +1276,7 @@ local function clearShelfAttachmentState(shelfUnit, state, destroyAttachments)
         state = currentState
     end
     if state == nil then
+        removeActiveShelfUnit(shelfUnit)
         return
     end
 
@@ -1231,6 +1292,7 @@ local function clearShelfAttachmentState(shelfUnit, state, destroyAttachments)
     if currentState == state then
         shelfAttachmentStates:set(shelfUnit, nil)
     end
+    removeActiveShelfUnit(shelfUnit)
 end
 
 ---@param shelfUnit Unit
@@ -1308,6 +1370,7 @@ local function createShelfAttachmentState(shelfUnit, shelfId, totalCount, rowCou
         destroyed = false,
     }
     shelfAttachmentStates:set(shelfUnit, state)
+    addActiveShelfUnit(shelfUnit)
     return state
 end
 
@@ -1322,7 +1385,7 @@ local function recordAttachmentIndex(state, task, attachmentUnit)
     end
 
     rowLayers[task.layerIndex] = {
-        anchorUnit = attachmentUnit,
+        attachmentUnit = attachmentUnit,
         deployedItemUnit = nil,
         deployedItemId = nil,
         deployedItemIndex = nil,
@@ -1483,6 +1546,154 @@ local function destroyNextShelf(actor, data)
     clearShelfAttachmentState(shelfUnit, nil, true)
     GameAPI.destroy_unit(shelfUnit)
     GlobalAPI.show_tips("已销毁队首货架，剩余: " .. tostring(#shelfDestroyQueue), SUCCESS_TIPS_DURATION)
+end
+
+---@param state table
+---@param rowIndex integer
+---@param expectedItemId string|nil
+---@return table|nil
+local function consumeOneDeployedItemInRow(state, rowIndex, expectedItemId)
+    if state == nil or state.destroyed then
+        return nil
+    end
+
+    local rowLayers = state.layers[rowIndex]
+    if type(rowLayers) ~= "table" then
+        return nil
+    end
+
+    for layerIndex = state.layoutPerRow, 1, -1 do
+        local attachmentInfo = rowLayers[layerIndex]
+        if attachmentInfo ~= nil and attachmentInfo.deployedItemUnit ~= nil then
+            local deployedItemId = attachmentInfo.deployedItemId
+            if expectedItemId == nil or deployedItemId == expectedItemId then
+                local deployedItemUnit = attachmentInfo.deployedItemUnit
+                local consumedItem = {
+                    rowIndex = rowIndex,
+                    layerIndex = layerIndex,
+                    itemId = deployedItemId,
+                    itemIndex = attachmentInfo.deployedItemIndex,
+                }
+
+                attachmentInfo.deployedItemUnit = nil
+                attachmentInfo.deployedItemId = nil
+                attachmentInfo.deployedItemIndex = nil
+                attachmentInfo.occupied = false
+
+                pcall(function()
+                    GameAPI.destroy_unit(deployedItemUnit)
+                end)
+                return consumedItem
+            end
+        end
+    end
+
+    return nil
+end
+
+---@param shelfUnit Unit|nil
+---@return integer consumedCount
+---@return table consumedItems
+function TestAttachmentHelper.consumeOneRoundByShelf(shelfUnit)
+    if shelfUnit == nil then
+        return 0, {}
+    end
+
+    local state = shelfAttachmentStates:get(shelfUnit)
+    if state == nil or state.destroyed then
+        return 0, {}
+    end
+
+    local consumedItems = {}
+    local consumedCount = 0
+    for rowIndex = 1, state.layoutRowCount do
+        local consumedItem = consumeOneDeployedItemInRow(state, rowIndex, nil)
+        if consumedItem ~= nil then
+            consumedItem.shelfUnit = shelfUnit
+            consumedItems[#consumedItems + 1] = consumedItem
+            consumedCount = consumedCount + 1
+        end
+    end
+    return consumedCount, consumedItems
+end
+
+---@param shelfUnit Unit|nil
+---@param itemId string|nil
+---@param requestCount integer|nil
+---@return integer consumedCount
+---@return table consumedItems
+function TestAttachmentHelper.consumeItemsByIntent(shelfUnit, itemId, requestCount)
+    -- 对外消费入口：后续顾客系统可直接按「指定货架 + 商品意图 + 数量」调用。
+    if shelfUnit == nil then
+        return 0, {}
+    end
+    if type(itemId) ~= "string" or itemId == "" then
+        return 0, {}
+    end
+    if type(requestCount) ~= "number" or requestCount ~= math.floor(requestCount) then
+        return 0, {}
+    end
+
+    local requestCountInteger = math.tointeger(requestCount)
+    if requestCountInteger == nil or requestCountInteger <= 0 then
+        return 0, {}
+    end
+
+    local state = shelfAttachmentStates:get(shelfUnit)
+    if state == nil or state.destroyed then
+        return 0, {}
+    end
+
+    local consumedItems = {}
+    local consumedCount = 0
+    local remainCount = requestCountInteger
+    -- 当前仅支持“指定货架优先”模式；跨货架聚合留给后续请求式消费扩展。
+    for rowIndex = 1, state.layoutRowCount do
+        while remainCount > 0 do
+            local consumedItem = consumeOneDeployedItemInRow(state, rowIndex, itemId)
+            if consumedItem == nil then
+                break
+            end
+
+            consumedItem.shelfUnit = shelfUnit
+            consumedItems[#consumedItems + 1] = consumedItem
+            consumedCount = consumedCount + 1
+            remainCount = remainCount - 1
+        end
+        if remainCount <= 0 then
+            break
+        end
+    end
+
+    return consumedCount, consumedItems
+end
+
+---@param shelfUnit Unit|nil
+---@return boolean
+function TestAttachmentHelper.isShelfActive(shelfUnit)
+    if shelfUnit == nil then
+        return false
+    end
+
+    local state = shelfAttachmentStates:get(shelfUnit)
+    return state ~= nil and not state.destroyed
+end
+
+---@return table
+function TestAttachmentHelper.getActiveShelfUnits()
+    -- 供测试消费线程发现活跃货架；正式顾客系统接入后可逐步收敛为按请求目标消费。
+    local compactedShelfUnits = {}
+    local snapshotShelfUnits = {}
+    for index = 1, #activeShelfUnits do
+        local shelfUnit = activeShelfUnits[index]
+        local state = shelfAttachmentStates:get(shelfUnit)
+        if state ~= nil and not state.destroyed then
+            compactedShelfUnits[#compactedShelfUnits + 1] = shelfUnit
+            snapshotShelfUnits[#snapshotShelfUnits + 1] = shelfUnit
+        end
+    end
+    activeShelfUnits = compactedShelfUnits
+    return snapshotShelfUnits
 end
 
 function TestAttachmentHelper.init()
