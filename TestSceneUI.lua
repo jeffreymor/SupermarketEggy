@@ -42,14 +42,14 @@ local function registerDeployButtonTouch(sceneUiLayer)
         return
     end
 
-    LuaAPI.global_register_trigger_event({ EVENT.EUI_NODE_TOUCH_EVENT, deployBtnNode, 1 }, function(_, actor, data)
+    local triggerId = LuaAPI.global_register_trigger_event({ EVENT.EUI_NODE_TOUCH_EVENT, deployBtnNode, 1 }, function(_, actor, data)
         if data == nil then
             print(TAG, "touch data nil: DeployBtn", actor)
             return
         end
         print(TAG, "DeployBtn touched, actor:", actor, "node:", data.eui_node_id)
     end)
-    print(TAG, "register DeployBtn touch:", deployBtnNode)
+    print(TAG, "register DeployBtn touch:", deployBtnNode, "triggerId:", triggerId)
 end
 
 ---@return boolean

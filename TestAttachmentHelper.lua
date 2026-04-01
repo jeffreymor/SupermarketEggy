@@ -998,10 +998,15 @@ local function registerShelfRowDeployTouchBySuffix(state, sceneUiLayer, rowIndex
         end
         handleShelfRowDeployTouch(state, rowIndex, actor, data, rawNodeKey, rawNodeKey, "suffix")
     end)
-    if type(triggerId) ~= "number" or triggerId ~= math.floor(triggerId) then
+
+    -- 在 EUI_NODE_TOUCH_EVENT 场景下，引擎可能不返回可用的注册 ID。
+    -- 不能以 triggerId 是否存在作为注册成功判定，业务侧以可观测行为为准。
+    if type(triggerId) == "number" and triggerId == math.floor(triggerId) then
+        -- 仅在拿到有效 triggerId 时记录，供后续可选反注册使用。
+        state.deployTouchTriggerIdsByRow[rowIndex] = triggerId
         print(
             TAG,
-            "register deploy touch by suffix failed, shelfId:",
+            "register deploy touch by suffix, shelfId:",
             state.shelfId,
             "rowIndex:",
             rowIndex,
@@ -1012,22 +1017,23 @@ local function registerShelfRowDeployTouchBySuffix(state, sceneUiLayer, rowIndex
             "triggerId:",
             triggerId
         )
-        return false
+    else
+        print(
+            TAG,
+            "register deploy touch by suffix, skipped triggerId, shelfId:",
+            state.shelfId,
+            "rowIndex:",
+            rowIndex,
+            "suffix:",
+            deployBtnNodeSuffix,
+            "nodeId:",
+            tostring(deployBtnNode),
+            "triggerId:",
+            triggerId,
+            "reason:",
+            "no valid triggerId returned; flow unaffected"
+        )
     end
-    state.deployTouchTriggerIdsByRow[rowIndex] = triggerId
-    print(
-        TAG,
-        "register deploy touch by suffix, shelfId:",
-        state.shelfId,
-        "rowIndex:",
-        rowIndex,
-        "suffix:",
-        deployBtnNodeSuffix,
-        "nodeId:",
-        tostring(deployBtnNode),
-        "triggerId:",
-        triggerId
-    )
     return true
 end
 
@@ -1037,12 +1043,23 @@ local function destroyShelfRowButtons(state)
         return
     end
 
+    local hasTriggerIdRecord = false
+    local hasValidTriggerId = false
     for _, triggerId in pairs(state.deployTouchTriggerIdsByRow or {}) do
+        hasTriggerIdRecord = true
         if type(triggerId) == "number" and triggerId == math.floor(triggerId) then
+            hasValidTriggerId = true
             pcall(function()
                 LuaAPI.global_unregister_trigger_event(triggerId)
             end)
+        else
+            print(TAG, "skip unregister trigger event, invalid triggerId:", triggerId)
         end
+    end
+    if not hasTriggerIdRecord then
+        print(TAG, "skip unregister trigger events, no triggerId")
+    elseif not hasValidTriggerId then
+        print(TAG, "skip unregister trigger events, no valid triggerId")
     end
 
     for _, sceneUiLayer in pairs(state.sceneUiLayersByRow or {}) do
@@ -1070,15 +1087,12 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
 
     local deployBtnNodeId = UINodes.DeployBtn
     local deployBtnNodeSuffix = nil
-    local suffixFallbackTriggered = false
-    -- 回退触发条件 1：配置显式关闭 suffix 触摸注册（DEPLOY_TOUCH_USE_SUFFIX=false）。
     local useSuffixTouch = state.deployTouchUseSuffix == true
     if useSuffixTouch then
         deployBtnNodeSuffix = extractNodeIdSuffix(deployBtnNodeId)
         if deployBtnNodeSuffix == nil then
-            -- 回退触发条件 2：DeployBtn 节点不满足 "前缀|后缀" 格式，无法解析后半截 token。
-            useSuffixTouch = false
-            print(TAG, "invalid DeployBtn node id for suffix mode, fallback to custom event, nodeId:", deployBtnNodeId)
+            print(TAG, "invalid DeployBtn node id for suffix mode, skip deploy touch registration, nodeId:", deployBtnNodeId)
+            return
         end
     end
 
@@ -1096,22 +1110,17 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
         if sceneUiLayer ~= nil then
             state.sceneUiLayersByRow[rowIndex] = sceneUiLayer
             if useSuffixTouch and deployBtnNodeSuffix ~= nil then
-                local registerOk = registerShelfRowDeployTouchBySuffix(state, sceneUiLayer, rowIndex, deployBtnNodeSuffix)
+                local registerOk = registerShelfRowDeployTouchBySuffix(
+                    state,
+                    sceneUiLayer,
+                    rowIndex,
+                    deployBtnNodeSuffix
+                )
                 if not registerOk then
-                    -- 回退触发条件 3：suffix 触摸注册任一层失败，当前货架整体验证失败，统一切回旧链路。
-                    useSuffixTouch = false
-                    suffixFallbackTriggered = true
-                end
-            end
-
-            if not useSuffixTouch then
-                if not suffixFallbackTriggered then
-                    registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
-                else
-                    -- 已触发整货架降级，旧映射将在循环结束后统一重建，避免重复注册。
+                    print(TAG, "suffix mode enabled, skip fallback mapping, shelfId:", state.shelfId, "rowIndex:", rowIndex)
                 end
             else
-                -- 当前层已走 suffix 注册，跳过旧映射注册。
+                registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
             end
         else
             print(TAG, "create shelf row button scene ui failed, shelfId:", state.shelfId, "row:", rowIndex)
@@ -1119,28 +1128,8 @@ local function createShelfRowButtons(shelfUnit, shelfConfig, state)
     end
 
     if useSuffixTouch then
-        -- suffix 模式生效：已通过 EUI_NODE_TOUCH_EVENT 完成逐层注册，不再注册 DeployBtnClicked 回退链路。
+        -- suffix 模式只走 EUI_NODE_TOUCH_EVENT，不注册 DeployBtnClicked。
         return
-    end
-
-    if suffixFallbackTriggered then
-        for _, triggerId in pairs(state.deployTouchTriggerIdsByRow or {}) do
-            if type(triggerId) == "number" and triggerId == math.floor(triggerId) then
-                pcall(function()
-                    LuaAPI.global_unregister_trigger_event(triggerId)
-                end)
-            end
-        end
-        state.deployTouchTriggerIdsByRow = {}
-        state.deployBtnRowByNodeId = {}
-        state.deployBtnWarnedUnknownNodeById = {}
-        -- 整货架回退：统一按旧映射链路重建所有已创建层，避免出现“部分 suffix + 部分旧模式”的混合状态。
-        for rowIndex = 1, layout.rowCount do
-            local sceneUiLayer = state.sceneUiLayersByRow[rowIndex]
-            if sceneUiLayer ~= nil then
-                registerShelfRowDeployButton(state, sceneUiLayer, rowIndex)
-            end
-        end
     end
 
     if state.deployBtnCustomEventRegistered then
